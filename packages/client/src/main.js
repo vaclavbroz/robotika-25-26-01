@@ -3,6 +3,17 @@ import * as THREE from "three";
 const WORLD_SIZE = 500;
 const TERRAIN_SEGMENTS = 220;
 const PLAYER_HEIGHT = 1.55;
+const AVATAR_BODY_HEIGHT = 1.1;
+const AVATAR_BODY_RADIUS = 0.26;
+const AVATAR_HEAD_RADIUS = 0.2;
+const AVATAR_LABEL_Y = 1.82;
+const LABEL_PIXELS_TO_WORLD_X = 1.9 / 384;
+const LABEL_PIXELS_TO_WORLD_Y = 0.48 / 96;
+const MAX_HEAD_PITCH = THREE.MathUtils.degToRad(28);
+const HEAD_PITCH_BIAS = THREE.MathUtils.degToRad(14);
+const AVATAR_PATTERNS = new Set(["solid", "stripes", "checker"]);
+const DEFAULT_AVATAR_COLOR = "#3c74d4";
+const DEFAULT_AVATAR_PATTERN = "solid";
 const MAX_PITCH = THREE.MathUtils.degToRad(75);
 const LOOK_AHEAD_DISTANCE = 16.0;
 const INPUT_SEND_HZ = 20;
@@ -105,6 +116,10 @@ const player = {
 const net = {
   socket: null,
   connected: false,
+  connecting: false,
+  nickname: "pilot",
+  avatarColor: DEFAULT_AVATAR_COLOR,
+  avatarPattern: DEFAULT_AVATAR_PATTERN,
   playerId: null,
   tickRate: INPUT_SEND_HZ,
   interpolationDelayMs: (INTERPOLATION_BACK_TICKS / INPUT_SEND_HZ) * 1000,
@@ -113,6 +128,7 @@ const net = {
   jumpQueued: false,
   playersById: new Map(),
   samplesByPlayerId: new Map(),
+  playerAvatarsById: new Map(),
   latestServerTick: 0,
   lastStateAtMs: 0,
   sentInputs: 0,
@@ -123,8 +139,15 @@ const net = {
 const cameraTarget = new THREE.Vector3();
 const lookDirection = new THREE.Vector3();
 let dragLookActive = false;
+let hasEverCapturedPointer = false;
 
 const help = document.getElementById("help");
+const helpTitle = document.getElementById("help-title");
+const helpText = document.getElementById("help-text");
+const nickInput = document.getElementById("nick-input");
+const connectButton = document.getElementById("connect-btn");
+const colorInput = document.getElementById("color-input");
+const patternSelect = document.getElementById("pattern-select");
 
 const onKey = (pressed) => (event) => {
   switch (event.code) {
@@ -143,6 +166,9 @@ const onKey = (pressed) => (event) => {
     case "Space":
       if (pressed) net.jumpQueued = true;
       break;
+    case "KeyL":
+      if (pressed) togglePointerLock();
+      break;
     default:
       break;
   }
@@ -152,15 +178,54 @@ document.addEventListener("keydown", onKey(true));
 document.addEventListener("keyup", onKey(false));
 
 function lockPointer() {
+  if (!net.connected) {
+    return;
+  }
   renderer.domElement.requestPointerLock();
 }
 
+function unlockPointer() {
+  if (document.pointerLockElement === renderer.domElement) {
+    document.exitPointerLock();
+  }
+}
+
+function togglePointerLock() {
+  if (document.pointerLockElement === renderer.domElement) {
+    unlockPointer();
+  } else {
+    lockPointer();
+  }
+}
+
 help.addEventListener("click", lockPointer);
-renderer.domElement.addEventListener("click", lockPointer);
+if (connectButton) {
+  connectButton.addEventListener("click", startConnectFromUi);
+}
+if (nickInput) {
+  nickInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      startConnectFromUi();
+    }
+  });
+}
 
 document.addEventListener("pointerlockchange", () => {
   const locked = document.pointerLockElement === renderer.domElement;
-  document.body.classList.toggle("playing", locked);
+  if (locked) {
+    hasEverCapturedPointer = true;
+    document.body.classList.add("playing");
+    document.body.classList.remove("mouse-free");
+    setHelpStatus("Mouse captured. Press Esc or L to release.", "Playing");
+    return;
+  }
+
+  document.body.classList.remove("playing");
+  if (hasEverCapturedPointer) {
+    document.body.classList.add("mouse-free");
+    setHelpStatus("Mouse released. Click panel or press L to capture again.", "Mouse Free");
+  }
 });
 
 document.addEventListener("mousemove", (event) => {
@@ -183,8 +248,17 @@ window.addEventListener("mouseup", () => {
   dragLookActive = false;
 });
 
+window.addEventListener("blur", () => {
+  keys.forward = false;
+  keys.backward = false;
+  keys.left = false;
+  keys.right = false;
+  dragLookActive = false;
+  net.jumpQueued = false;
+});
+
 const clock = new THREE.Clock();
-connectToServer();
+initConnectUi();
 
 function animate() {
   requestAnimationFrame(animate);
@@ -192,6 +266,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   sendInputTicks(dt);
   syncLocalPlayerFromServer();
+  syncRenderedPlayersFromServer();
   updateNetDebug();
 
   lookDirection.set(
@@ -213,14 +288,27 @@ function connectToServer() {
   const host = window.location.hostname || "127.0.0.1";
   const url = `${protocol}://${host}:2567`;
 
-  setHelpStatus(`Connecting to ${url}...`);
+  setHelpStatus(`Connecting as ${net.nickname} to ${url}...`, "Connecting");
+  net.connecting = true;
+  updateConnectUi();
   const socket = new WebSocket(url);
   net.socket = socket;
 
   socket.addEventListener("open", () => {
     net.connected = true;
-    socket.send(JSON.stringify({ type: "hello", name: "pilot" }));
-    setHelpStatus("Connected. Click to lock pointer; input is now sent to server.");
+    net.connecting = false;
+    updateConnectUi();
+    socket.send(
+      JSON.stringify({
+        type: "hello",
+        name: net.nickname,
+        avatar: {
+          color: net.avatarColor,
+          pattern: net.avatarPattern,
+        },
+      }),
+    );
+    setHelpStatus("Connected. Click panel or press L to capture mouse.", "Connected");
   });
 
   socket.addEventListener("message", (event) => {
@@ -235,11 +323,23 @@ function connectToServer() {
 
   socket.addEventListener("close", () => {
     net.connected = false;
-    setHelpStatus("Disconnected from server.");
+    net.connecting = false;
+    net.playerId = null;
+    net.playersById.clear();
+    net.samplesByPlayerId.clear();
+    for (const playerId of net.playerAvatarsById.keys()) {
+      removePlayerAvatar(playerId);
+    }
+    document.body.classList.remove("connected");
+    document.body.classList.remove("playing");
+    updateConnectUi();
+    setHelpStatus("Disconnected from server.", "Disconnected");
   });
 
   socket.addEventListener("error", () => {
-    setHelpStatus("Connection error. Ensure server is running on port 2567.");
+    net.connecting = false;
+    updateConnectUi();
+    setHelpStatus("Connection error. Ensure server is running on port 2567.", "Connection Error");
   });
 }
 
@@ -256,6 +356,9 @@ function onServerMessage(message) {
     }
     net.playersById.clear();
     net.samplesByPlayerId.clear();
+    for (const playerId of net.playerAvatarsById.keys()) {
+      removePlayerAvatar(playerId);
+    }
 
     const snapshotPlayers = Array.isArray(message.snapshot?.players) ? message.snapshot.players : [];
     applyServerPlayerStates(snapshotPlayers, message.snapshot?.tick, { replaceAll: true });
@@ -272,6 +375,7 @@ function onServerMessage(message) {
   if (message.type === "despawn" && typeof message.playerId === "string") {
     net.playersById.delete(message.playerId);
     net.samplesByPlayerId.delete(message.playerId);
+    removePlayerAvatar(message.playerId);
     return;
   }
 
@@ -317,6 +421,11 @@ function applyServerPlayerStates(playerStates, tick, options = {}) {
     for (const playerId of net.samplesByPlayerId.keys()) {
       if (!net.playersById.has(playerId)) {
         net.samplesByPlayerId.delete(playerId);
+      }
+    }
+    for (const playerId of net.playerAvatarsById.keys()) {
+      if (!net.playersById.has(playerId)) {
+        removePlayerAvatar(playerId);
       }
     }
   }
@@ -415,6 +524,284 @@ function syncLocalPlayerFromServer() {
   player.position.set(x, worldY + PLAYER_HEIGHT, z);
 }
 
+function syncRenderedPlayersFromServer() {
+  for (const [playerId, state] of net.playersById) {
+    if (playerId === net.playerId) {
+      continue;
+    }
+
+    const sample = sampleInterpolatedPosition(playerId);
+    const position = sample ?? state?.position;
+    if (!position) {
+      continue;
+    }
+
+    const x = Number(position.x) || 0;
+    const y = Number(position.y) || 0;
+    const z = Number(position.z) || 0;
+    const terrainY = terrainHeight(x, z);
+    const worldY = terrainY + Math.max(0, y);
+    const avatar = getOrCreatePlayerAvatar(playerId);
+    avatar.root.position.set(x, worldY, z);
+    const yaw = Number(state?.yaw) || 0;
+    const pitch = Number(state?.pitch) || 0;
+    avatar.root.rotation.y = -yaw;
+    avatar.head.rotation.x = THREE.MathUtils.clamp(HEAD_PITCH_BIAS + pitch * 0.45, -MAX_HEAD_PITCH, MAX_HEAD_PITCH);
+    applyAvatarAppearance(avatar, state?.avatar);
+    updateAvatarLabel(avatar, state?.name);
+  }
+}
+
+function getOrCreatePlayerAvatar(playerId) {
+  const existing = net.playerAvatarsById.get(playerId);
+  if (existing) {
+    return existing;
+  }
+
+  const root = new THREE.Group();
+
+  const bodyGeometry = new THREE.CapsuleGeometry(
+    AVATAR_BODY_RADIUS,
+    AVATAR_BODY_HEIGHT - AVATAR_BODY_RADIUS * 2,
+    4,
+    10,
+  );
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    roughness: 0.42,
+    metalness: 0.08,
+  });
+  const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+  body.position.y = AVATAR_BODY_HEIGHT * 0.5;
+  body.castShadow = true;
+  root.add(body);
+
+  const head = new THREE.Group();
+  head.position.y = AVATAR_BODY_HEIGHT + AVATAR_HEAD_RADIUS * 0.92;
+  root.add(head);
+
+  const headGeometry = new THREE.SphereGeometry(AVATAR_HEAD_RADIUS, 18, 14);
+  const headMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf3d5b0,
+    roughness: 0.78,
+    metalness: 0.02,
+  });
+  const headMesh = new THREE.Mesh(headGeometry, headMaterial);
+  headMesh.castShadow = true;
+  head.add(headMesh);
+
+  const eyeGeometry = new THREE.SphereGeometry(0.042, 12, 10);
+  const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.35, metalness: 0.05 });
+  const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
+  leftEye.position.set(-0.075, 0.04, -AVATAR_HEAD_RADIUS + 0.02);
+  const rightEye = leftEye.clone();
+  rightEye.position.x = 0.07;
+  head.add(leftEye, rightEye);
+
+  const mouthGeometry = new THREE.BoxGeometry(0.11, 0.02, 0.02);
+  const mouthMaterial = new THREE.MeshStandardMaterial({ color: 0x6f2d2d, roughness: 0.5, metalness: 0.02 });
+  const mouth = new THREE.Mesh(mouthGeometry, mouthMaterial);
+  mouth.position.set(0, -0.07, -AVATAR_HEAD_RADIUS + 0.02);
+  head.add(mouth);
+
+  const label = createAvatarLabelSprite();
+  label.position.set(0, AVATAR_LABEL_Y, 0);
+  root.add(label);
+
+  scene.add(root);
+  const avatar = {
+    root,
+    head,
+    bodyMaterial,
+    label,
+    labelTexture: label.material.map,
+    labelCanvas: label.userData.labelCanvas,
+    labelCtx: label.userData.labelCtx,
+    labelName: "",
+    appearanceKey: "",
+    bodyPatternTexture: null,
+  };
+  net.playerAvatarsById.set(playerId, avatar);
+  return avatar;
+}
+
+function applyAvatarAppearance(avatar, rawAvatarStyle) {
+  const colorHex = normalizeAvatarColor(rawAvatarStyle?.color);
+  const pattern = sanitizeAvatarPattern(rawAvatarStyle?.pattern);
+  const key = `${colorHex}|${pattern}`;
+  if (avatar.appearanceKey === key) {
+    return;
+  }
+  avatar.appearanceKey = key;
+
+  if (avatar.bodyPatternTexture) {
+    avatar.bodyPatternTexture.dispose();
+    avatar.bodyPatternTexture = null;
+  }
+
+  if (pattern === "solid") {
+    avatar.bodyMaterial.map = null;
+    avatar.bodyMaterial.color.set(colorHex);
+    avatar.bodyMaterial.needsUpdate = true;
+    return;
+  }
+
+  const texture = createAvatarBodyTexture(colorHex, pattern);
+  avatar.bodyPatternTexture = texture;
+  avatar.bodyMaterial.color.set(0xffffff);
+  avatar.bodyMaterial.map = texture;
+  avatar.bodyMaterial.needsUpdate = true;
+}
+
+function createAvatarBodyTexture(colorHex, pattern) {
+  const size = 128;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return null;
+  }
+
+  const base = new THREE.Color(colorHex);
+  const dark = base.clone().multiplyScalar(0.42);
+  const light = base.clone().lerp(new THREE.Color(0xffffff), 0.16);
+  ctx.fillStyle = `#${base.getHexString()}`;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.fillStyle = `#${dark.getHexString()}`;
+  if (pattern === "stripes") {
+    const stripe = 14;
+    for (let x = 0; x < size; x += stripe * 2) {
+      ctx.fillRect(x, 0, stripe, size);
+    }
+    ctx.fillStyle = `#${light.getHexString()}`;
+    for (let x = stripe; x < size; x += stripe * 2) {
+      ctx.fillRect(x, 0, Math.max(2, Math.floor(stripe * 0.24)), size);
+    }
+  } else {
+    const cell = 14;
+    for (let y = 0; y < size; y += cell) {
+      for (let x = 0; x < size; x += cell) {
+        if (((x / cell) + (y / cell)) % 2 === 0) {
+          ctx.fillRect(x, y, cell, cell);
+        }
+      }
+    }
+    ctx.strokeStyle = `#${light.getHexString()}`;
+    ctx.lineWidth = 1;
+    for (let n = 0; n <= size; n += cell) {
+      ctx.beginPath();
+      ctx.moveTo(n, 0);
+      ctx.lineTo(n, size);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, n);
+      ctx.lineTo(size, n);
+      ctx.stroke();
+    }
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = THREE.RepeatWrapping;
+  texture.wrapT = THREE.RepeatWrapping;
+  texture.repeat.set(1.4, 1.4);
+  return texture;
+}
+
+function updateAvatarLabel(avatar, rawName) {
+  const safeName = sanitizeNickname(rawName);
+  if (avatar.labelName === safeName) {
+    return;
+  }
+  avatar.labelName = safeName;
+
+  const ctx = avatar.labelCtx;
+  const canvas = avatar.labelCanvas;
+  if (!ctx || !canvas) {
+    return;
+  }
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = "bold 60px Segoe UI";
+  const textWidth = ctx.measureText(safeName).width;
+  const boxWidth = Math.max(120, Math.min(canvas.width - 8, Math.ceil(textWidth + 40)));
+  const boxHeight = 92;
+  const boxX = Math.floor((canvas.width - boxWidth) * 0.5);
+  const boxY = Math.floor((canvas.height - boxHeight) * 0.5);
+
+  drawRoundRect(ctx, boxX, boxY, boxWidth, boxHeight, 14);
+  ctx.fillStyle = "rgba(7, 12, 20, 0.72)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(210, 232, 255, 0.7)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#f3f8ff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(safeName, canvas.width / 2, canvas.height / 2);
+  avatar.label.scale.set(boxWidth * LABEL_PIXELS_TO_WORLD_X, boxHeight * LABEL_PIXELS_TO_WORLD_Y, 1);
+  avatar.labelTexture.needsUpdate = true;
+}
+
+function createAvatarLabelSprite() {
+  const canvas = document.createElement("canvas");
+  canvas.width = 384;
+  canvas.height = 96;
+  const ctx = canvas.getContext("2d");
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.generateMipmaps = false;
+  texture.minFilter = THREE.LinearFilter;
+  texture.magFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(1.9, 0.48, 1);
+  sprite.renderOrder = 3;
+  sprite.userData.labelCanvas = canvas;
+  sprite.userData.labelCtx = ctx;
+  return sprite;
+}
+
+function removePlayerAvatar(playerId) {
+  const avatar = net.playerAvatarsById.get(playerId);
+  if (!avatar) {
+    return;
+  }
+
+  scene.remove(avatar.root);
+  avatar.root.traverse((node) => {
+    if (node.geometry) {
+      node.geometry.dispose();
+    }
+    if (node.material) {
+      if (Array.isArray(node.material)) {
+        for (const material of node.material) {
+          if (material.map) {
+            material.map.dispose();
+          }
+          material.dispose();
+        }
+      } else {
+        if (node.material.map) {
+          node.material.map.dispose();
+        }
+        node.material.dispose();
+      }
+    }
+  });
+  if (avatar.labelTexture) {
+    avatar.labelTexture.dispose();
+  }
+  net.playerAvatarsById.delete(playerId);
+}
+
 function sampleInterpolatedPosition(playerId) {
   const samples = net.samplesByPlayerId.get(playerId);
   if (!samples || samples.length < 2) {
@@ -449,9 +836,81 @@ function sampleInterpolatedPosition(playerId) {
   return lastSample;
 }
 
-function setHelpStatus(text) {
-  if (help) {
-    help.textContent = text;
+function setHelpStatus(text, title = "Click to Play") {
+  const nextText = text;
+  const nextTitle = title;
+
+  if (helpTitle) {
+    helpTitle.textContent = nextTitle;
+  }
+  if (helpText) {
+    helpText.textContent = nextText;
+  }
+}
+
+function initConnectUi() {
+  const savedNickname = window.localStorage.getItem("hra.nickname");
+  const savedAvatarColor = window.localStorage.getItem("hra.avatarColor");
+  const savedAvatarPattern = window.localStorage.getItem("hra.avatarPattern");
+  if (typeof savedNickname === "string" && savedNickname.trim() !== "") {
+    net.nickname = sanitizeNickname(savedNickname);
+  }
+  if (typeof savedAvatarColor === "string") {
+    net.avatarColor = normalizeAvatarColor(savedAvatarColor);
+  }
+  if (typeof savedAvatarPattern === "string") {
+    net.avatarPattern = sanitizeAvatarPattern(savedAvatarPattern);
+  }
+  if (nickInput) {
+    nickInput.value = net.nickname;
+  }
+  if (colorInput) {
+    colorInput.value = net.avatarColor;
+  }
+  if (patternSelect) {
+    patternSelect.value = net.avatarPattern;
+  }
+  updateConnectUi();
+  setHelpStatus("Enter nickname and connect. Then click panel or press L to capture mouse.", "Ready");
+}
+
+function startConnectFromUi() {
+  if (net.connected || net.connecting) {
+    return;
+  }
+  net.nickname = sanitizeNickname(nickInput?.value);
+  net.avatarColor = normalizeAvatarColor(colorInput?.value);
+  net.avatarPattern = sanitizeAvatarPattern(patternSelect?.value);
+  if (nickInput) {
+    nickInput.value = net.nickname;
+  }
+  if (colorInput) {
+    colorInput.value = net.avatarColor;
+  }
+  if (patternSelect) {
+    patternSelect.value = net.avatarPattern;
+  }
+  window.localStorage.setItem("hra.nickname", net.nickname);
+  window.localStorage.setItem("hra.avatarColor", net.avatarColor);
+  window.localStorage.setItem("hra.avatarPattern", net.avatarPattern);
+  connectToServer();
+}
+
+function updateConnectUi() {
+  document.body.classList.toggle("connected", net.connected);
+  const disabled = net.connected || net.connecting;
+  if (nickInput) {
+    nickInput.disabled = disabled;
+  }
+  if (colorInput) {
+    colorInput.disabled = disabled;
+  }
+  if (patternSelect) {
+    patternSelect.disabled = disabled;
+  }
+  if (connectButton) {
+    connectButton.disabled = disabled;
+    connectButton.textContent = net.connecting ? "Connecting..." : "Connect";
   }
 }
 
@@ -536,6 +995,43 @@ function smoothstep(t) {
 function rand2(x, z) {
   const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453123;
   return s - Math.floor(s);
+}
+
+function sanitizeNickname(rawName) {
+  if (typeof rawName !== "string") {
+    return "pilot";
+  }
+  const cleaned = rawName.replace(/\s+/g, " ").trim().slice(0, 20);
+  return cleaned.length > 0 ? cleaned : "pilot";
+}
+
+function normalizeAvatarColor(rawColor) {
+  if (typeof rawColor !== "string") {
+    return DEFAULT_AVATAR_COLOR;
+  }
+  const trimmed = rawColor.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return DEFAULT_AVATAR_COLOR;
+}
+
+function sanitizeAvatarPattern(rawPattern) {
+  if (typeof rawPattern !== "string") {
+    return DEFAULT_AVATAR_PATTERN;
+  }
+  return AVATAR_PATTERNS.has(rawPattern) ? rawPattern : DEFAULT_AVATAR_PATTERN;
+}
+
+function drawRoundRect(ctx, x, y, width, height, radius) {
+  const r = Math.min(radius, width * 0.5, height * 0.5);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + width, y, x + width, y + height, r);
+  ctx.arcTo(x + width, y + height, x, y + height, r);
+  ctx.arcTo(x, y + height, x, y, r);
+  ctx.arcTo(x, y, x + width, y, r);
+  ctx.closePath();
 }
 
 function createTerrainDetailTexture(rendererInstance) {

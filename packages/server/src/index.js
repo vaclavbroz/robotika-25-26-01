@@ -241,6 +241,7 @@ function onFrame(connection, opcode, payload) {
     const player = world.getPlayer(connection.playerId);
     if (player) {
       player.setName(message.name);
+      player.setAvatar(message.avatar);
     }
     return;
   }

@@ -11,6 +11,7 @@ export class PlayerState {
     moveZ,
     yaw,
     pitch,
+    avatar,
   }) {
     this.playerId = playerId;
     this.position = { ...position };
@@ -23,6 +24,10 @@ export class PlayerState {
     this.moveZ = moveZ;
     this.yaw = yaw;
     this.pitch = pitch;
+    this.avatar = {
+      color: normalizeAvatarColor(avatar?.color),
+      pattern: sanitizeAvatarPattern(avatar?.pattern),
+    };
   }
 
   static createInitial(playerId) {
@@ -38,6 +43,10 @@ export class PlayerState {
       moveZ: 0,
       yaw: 0,
       pitch: 0,
+      avatar: {
+        color: "#3c74d4",
+        pattern: "solid",
+      },
     });
   }
 
@@ -46,6 +55,16 @@ export class PlayerState {
       return;
     }
     this.name = rawName.slice(0, 32);
+  }
+
+  setAvatar(rawAvatar) {
+    if (!rawAvatar || typeof rawAvatar !== "object") {
+      return;
+    }
+    this.avatar = {
+      color: normalizeAvatarColor(rawAvatar.color),
+      pattern: sanitizeAvatarPattern(rawAvatar.pattern),
+    };
   }
 
   requestJump() {
@@ -129,6 +148,9 @@ export class PlayerState {
       velocity: this.velocity,
       onGround: this.onGround,
       name: this.name,
+      yaw: this.yaw,
+      pitch: this.pitch,
+      avatar: this.avatar,
     };
   }
 }
@@ -171,4 +193,22 @@ function normalizeStick(x, z) {
     return { x, z };
   }
   return { x: x / length, z: z / length };
+}
+
+function normalizeAvatarColor(rawColor) {
+  if (typeof rawColor !== "string") {
+    return "#3c74d4";
+  }
+  const trimmed = rawColor.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(trimmed)) {
+    return trimmed.toLowerCase();
+  }
+  return "#3c74d4";
+}
+
+function sanitizeAvatarPattern(rawPattern) {
+  if (rawPattern === "stripes" || rawPattern === "checker" || rawPattern === "solid") {
+    return rawPattern;
+  }
+  return "solid";
 }

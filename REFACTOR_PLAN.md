@@ -66,7 +66,9 @@ Last updated: 2026-02-26 (current state recorded)
    - completed: `2026-02-26`
    - notes: Server now sends periodic full `snapshot` replication and tick-level `delta` updates for changed players. Client consumes `snapshot`/`delta` messages, buffers authoritative samples, and renders local player position using time-delayed interpolation to reduce jitter.
 10. Add multiplayer spawn/despawn rendering for multiple players.
-   - status: `pending`
+   - status: `done`
+   - completed: `2026-02-26`
+   - notes: Client now creates/removes remote player avatar meshes from authoritative spawn/despawn and snapshot replacement flows, and updates their positions each frame using the existing interpolation sample buffer.
 
 ## Phase 4: Script Upload and Sandbox Isolation
 

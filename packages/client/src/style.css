@@ -39,6 +39,7 @@ canvas {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+  pointer-events: auto;
   text-align: center;
   background: rgba(0, 0, 0, 0.5);
   padding: 20px 28px;
@@ -56,6 +57,105 @@ canvas {
   opacity: 0.9;
 }
 
+#connect-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 10px;
+  pointer-events: auto;
+}
+
+#connect-panel label {
+  font-size: 13px;
+  opacity: 0.9;
+}
+
+#connect-row {
+  display: flex;
+  gap: 8px;
+}
+
+#avatar-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+
+#nick-input {
+  min-width: 180px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 7px;
+  color: #f4f8ff;
+  padding: 7px 9px;
+  font: inherit;
+}
+
+#connect-btn {
+  background: rgba(116, 176, 255, 0.35);
+  border: 1px solid rgba(160, 206, 255, 0.6);
+  color: #f4f8ff;
+  border-radius: 7px;
+  padding: 7px 11px;
+  font: inherit;
+  cursor: pointer;
+}
+
+#color-input {
+  width: 36px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  padding: 0;
+}
+
+#pattern-select {
+  background: rgba(244, 248, 255, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 7px;
+  color: #152033;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+#pattern-select option {
+  background: #f4f8ff;
+  color: #152033;
+}
+
+#connect-btn[disabled],
+#nick-input[disabled],
+#color-input[disabled],
+#pattern-select[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+body.connected #connect-panel {
+  display: none;
+}
+
 body.playing #help {
   display: none;
+}
+
+body.mouse-free #help {
+  top: auto;
+  left: 14px;
+  bottom: 14px;
+  transform: none;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+
+body.mouse-free #help h1 {
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+
+body.mouse-free #help p {
+  font-size: 13px;
 }
