@@ -3,6 +3,7 @@
 - Never run install commands on your own (for example: `npm install`, `npm i`, `pnpm install`, `yarn install`) unless the user explicitly asks for it.
 - Never run build commands on your own (for example: `npm run build`, `pnpm build`, `yarn build`) unless the user explicitly asks for it.
 - The long-term refactor plan based on `goal.md` is in `REFACTOR_PLAN.md`. During follow-up work, update step statuses (`pending`/`done`) there only.
+- When creating a commit, always include newly created files that are part of the requested change (not only modified tracked files). Verify with `git status --short` before commit.
 
 ## Starting The Full Stack On Request
 
