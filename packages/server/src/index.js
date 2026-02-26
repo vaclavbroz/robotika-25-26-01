@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
+import { networkInterfaces } from "node:os";
 import { WorldState } from "./world-state.js";
 
 const TICK_HZ = 20;
@@ -73,6 +74,9 @@ server.on("upgrade", (req, socket) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[server] websocket gateway listening on ws://${HOST}:${PORT} (${TICK_HZ} Hz sim)`);
+  const lanIp = resolveLanIpv4();
+  const clientHost = lanIp || "127.0.0.1";
+  console.log(`[server] client url http://${clientHost}:5173`);
 });
 
 setInterval(() => {
@@ -388,4 +392,32 @@ function encodeFrame(payload, opcode) {
   header[1] = 127;
   header.writeBigUInt64BE(BigInt(payloadLength), 2);
   return Buffer.concat([header, payload]);
+}
+
+function resolveLanIpv4() {
+  const interfaces = networkInterfaces();
+  const preferred = [];
+  const others = [];
+
+  for (const entries of Object.values(interfaces)) {
+    if (!Array.isArray(entries)) {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry || entry.internal || entry.family !== "IPv4") {
+        continue;
+      }
+      if (
+        entry.address.startsWith("192.168.") ||
+        entry.address.startsWith("10.") ||
+        /^172\.(1[6-9]|2\d|3[0-1])\./.test(entry.address)
+      ) {
+        preferred.push(entry.address);
+      } else {
+        others.push(entry.address);
+      }
+    }
+  }
+
+  return preferred[0] || others[0] || null;
 }
