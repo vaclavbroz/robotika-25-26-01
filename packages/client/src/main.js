@@ -7,6 +7,7 @@ const MAX_PITCH = THREE.MathUtils.degToRad(75);
 const LOOK_AHEAD_DISTANCE = 16.0;
 const INPUT_SEND_HZ = 20;
 const INPUT_SEND_DT = 1 / INPUT_SEND_HZ;
+const INTERPOLATION_BACK_TICKS = 2;
 const INPUT_BUTTON_JUMP = 1 << 0;
 const INPUT_BUTTON_FORWARD = 1 << 1;
 const INPUT_BUTTON_BACKWARD = 1 << 2;
@@ -105,10 +106,14 @@ const net = {
   socket: null,
   connected: false,
   playerId: null,
+  tickRate: INPUT_SEND_HZ,
+  interpolationDelayMs: (INTERPOLATION_BACK_TICKS / INPUT_SEND_HZ) * 1000,
   inputSeq: 0,
   inputAccumulator: 0,
   jumpQueued: false,
   playersById: new Map(),
+  samplesByPlayerId: new Map(),
+  latestServerTick: 0,
   lastStateAtMs: 0,
   sentInputs: 0,
   recvStates: 0,
@@ -245,38 +250,110 @@ function onServerMessage(message) {
 
   if (message.type === "welcome") {
     net.playerId = message.playerId;
+    if (typeof message.tickRate === "number" && Number.isFinite(message.tickRate) && message.tickRate > 0) {
+      net.tickRate = message.tickRate;
+      net.interpolationDelayMs = (INTERPOLATION_BACK_TICKS / net.tickRate) * 1000;
+    }
     net.playersById.clear();
+    net.samplesByPlayerId.clear();
 
     const snapshotPlayers = Array.isArray(message.snapshot?.players) ? message.snapshot.players : [];
-    for (const state of snapshotPlayers) {
-      if (state && typeof state.playerId === "string") {
-        net.playersById.set(state.playerId, state);
-      }
-    }
+    applyServerPlayerStates(snapshotPlayers, message.snapshot?.tick, { replaceAll: true });
     return;
   }
 
   if (message.type === "spawn") {
     if (message.state && typeof message.state.playerId === "string") {
-      net.playersById.set(message.state.playerId, message.state);
+      applyServerPlayerStates([message.state], message.tick);
     }
     return;
   }
 
   if (message.type === "despawn" && typeof message.playerId === "string") {
     net.playersById.delete(message.playerId);
+    net.samplesByPlayerId.delete(message.playerId);
+    return;
+  }
+
+  if (message.type === "snapshot") {
+    const nextPlayers = Array.isArray(message.players) ? message.players : [];
+    applyServerPlayerStates(nextPlayers, message.tick, { replaceAll: true });
+    return;
+  }
+
+  if (message.type === "delta") {
+    const nextPlayers = Array.isArray(message.players) ? message.players : [];
+    applyServerPlayerStates(nextPlayers, message.tick);
     return;
   }
 
   if (message.type === "state") {
     const nextPlayers = Array.isArray(message.players) ? message.players : [];
-    for (const state of nextPlayers) {
-      if (state && typeof state.playerId === "string") {
-        net.playersById.set(state.playerId, state);
+    applyServerPlayerStates(nextPlayers, message.tick);
+  }
+}
+
+function applyServerPlayerStates(playerStates, tick, options = {}) {
+  const replaceAll = options.replaceAll === true;
+  const now = performance.now();
+
+  if (replaceAll) {
+    net.playersById.clear();
+  }
+
+  for (const state of playerStates) {
+    if (!state || typeof state.playerId !== "string") {
+      continue;
+    }
+    net.playersById.set(state.playerId, state);
+    pushSample(state.playerId, state, tick, now);
+  }
+
+  if (typeof tick === "number" && Number.isFinite(tick)) {
+    net.latestServerTick = Math.max(net.latestServerTick, tick);
+  }
+
+  if (replaceAll) {
+    for (const playerId of net.samplesByPlayerId.keys()) {
+      if (!net.playersById.has(playerId)) {
+        net.samplesByPlayerId.delete(playerId);
       }
     }
-    net.lastStateAtMs = performance.now();
-    net.recvStates += 1;
+  }
+
+  net.lastStateAtMs = now;
+  net.recvStates += 1;
+}
+
+function pushSample(playerId, state, tick, nowMs) {
+  const position = state?.position;
+  if (!position) {
+    return;
+  }
+
+  const sample = {
+    tick: Number.isFinite(tick) ? tick : net.latestServerTick,
+    atMs: nowMs,
+    x: Number(position.x) || 0,
+    y: Number(position.y) || 0,
+    z: Number(position.z) || 0,
+  };
+
+  let samples = net.samplesByPlayerId.get(playerId);
+  if (!samples) {
+    samples = [];
+    net.samplesByPlayerId.set(playerId, samples);
+  }
+
+  const last = samples[samples.length - 1];
+  if (last && last.tick === sample.tick) {
+    samples[samples.length - 1] = sample;
+  } else {
+    samples.push(sample);
+  }
+
+  if (samples.length > 40) {
+    samples.splice(0, samples.length - 40);
   }
 }
 
@@ -319,7 +396,8 @@ function syncLocalPlayerFromServer() {
     return;
   }
   const authoritative = net.playersById.get(net.playerId);
-  if (!authoritative?.position) {
+  const sample = sampleInterpolatedPosition(net.playerId);
+  if (!sample && !authoritative?.position) {
     if (DEBUG_NET && net.connected) {
       const now = performance.now();
       if (net.lastStateAtMs > 0 && now - net.lastStateAtMs > 2000) {
@@ -329,10 +407,46 @@ function syncLocalPlayerFromServer() {
     return;
   }
 
-  const x = Number(authoritative.position.x) || 0;
-  const z = Number(authoritative.position.z) || 0;
-  const y = Number(authoritative.position.y) || 0;
-  player.position.set(x, y + PLAYER_HEIGHT, z);
+  const x = sample ? sample.x : Number(authoritative.position.x) || 0;
+  const z = sample ? sample.z : Number(authoritative.position.z) || 0;
+  const y = sample ? sample.y : Number(authoritative.position.y) || 0;
+  const terrainY = terrainHeight(x, z);
+  const worldY = terrainY + Math.max(0, y);
+  player.position.set(x, worldY + PLAYER_HEIGHT, z);
+}
+
+function sampleInterpolatedPosition(playerId) {
+  const samples = net.samplesByPlayerId.get(playerId);
+  if (!samples || samples.length < 2) {
+    return null;
+  }
+
+  const renderAtMs = performance.now() - net.interpolationDelayMs;
+  if (renderAtMs <= samples[0].atMs) {
+    return samples[0];
+  }
+
+  const lastSample = samples[samples.length - 1];
+  if (renderAtMs >= lastSample.atMs) {
+    return lastSample;
+  }
+
+  for (let i = 1; i < samples.length; i += 1) {
+    const current = samples[i];
+    if (renderAtMs > current.atMs) {
+      continue;
+    }
+    const previous = samples[i - 1];
+    const spanMs = Math.max(1, current.atMs - previous.atMs);
+    const alpha = THREE.MathUtils.clamp((renderAtMs - previous.atMs) / spanMs, 0, 1);
+    return {
+      x: THREE.MathUtils.lerp(previous.x, current.x, alpha),
+      y: THREE.MathUtils.lerp(previous.y, current.y, alpha),
+      z: THREE.MathUtils.lerp(previous.z, current.z, alpha),
+    };
+  }
+
+  return lastSample;
 }
 
 function setHelpStatus(text) {

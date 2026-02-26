@@ -5,6 +5,7 @@ import { WorldState } from "./world-state.js";
 const TICK_HZ = 20;
 const tickMs = Math.round(1000 / TICK_HZ);
 const SIM_DT_SECONDS = 1 / TICK_HZ;
+const SNAPSHOT_INTERVAL_TICKS = TICK_HZ;
 const INPUT_BUTTON_JUMP = 1 << 0;
 const INPUT_BUTTON_FORWARD = 1 << 1;
 const INPUT_BUTTON_BACKWARD = 1 << 2;
@@ -28,6 +29,7 @@ const HOST = process.env.HOST || "0.0.0.0";
 const world = new WorldState();
 
 const socketsByPlayerId = new Map();
+const lastSentPlayerStateById = new Map();
 
 const server = createServer((req, res) => {
   if (req.url === "/health") {
@@ -70,11 +72,7 @@ server.listen(PORT, HOST, () => {
 
 setInterval(() => {
   world.simulateTick(SIM_DT_SECONDS, SIMULATION_CONFIG);
-  broadcastJson({
-    type: "state",
-    tick: world.tick,
-    players: Array.from(world.players.values()),
-  });
+  broadcastReplicationUpdate();
   if (world.tick % TICK_HZ === 0) {
     console.log(`[server] alive tick=${world.tick} players=${world.getPlayerCount()}`);
   }
@@ -123,8 +121,47 @@ function cleanupPlayerSession(connection) {
 
   if (removedPlayer) {
     broadcastJson({ type: "despawn", playerId }, { excludePlayerId: playerId });
+    lastSentPlayerStateById.delete(playerId);
     console.log(`[server] disconnected playerId=${playerId} players=${world.getPlayerCount()}`);
   }
+}
+
+function broadcastReplicationUpdate() {
+  if (world.tick % SNAPSHOT_INTERVAL_TICKS === 0) {
+    const snapshot = world.createSnapshot();
+    for (const state of snapshot.players) {
+      if (!state || typeof state.playerId !== "string") {
+        continue;
+      }
+      lastSentPlayerStateById.set(state.playerId, JSON.stringify(state));
+    }
+    broadcastJson({
+      type: "snapshot",
+      tick: snapshot.tick,
+      players: snapshot.players,
+    });
+    return;
+  }
+
+  const changedPlayers = [];
+  for (const [playerId, player] of world.players) {
+    const serializedState = JSON.stringify(player);
+    if (serializedState === lastSentPlayerStateById.get(playerId)) {
+      continue;
+    }
+    lastSentPlayerStateById.set(playerId, serializedState);
+    changedPlayers.push(player);
+  }
+
+  if (changedPlayers.length === 0) {
+    return;
+  }
+
+  broadcastJson({
+    type: "delta",
+    tick: world.tick,
+    players: changedPlayers,
+  });
 }
 
 function broadcastJson(payload, options = {}) {

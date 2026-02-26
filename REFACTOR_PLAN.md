@@ -62,7 +62,9 @@ Last updated: 2026-02-26 (current state recorded)
    - completed: `2026-02-26`
    - notes: Client now connects to server WebSocket and sends fixed-rate `input` messages (`seq`, `buttonsBitmask`, `yaw`, `pitch`) at 20 Hz. Local movement physics loop was removed and client position is now sourced from authoritative server state messages (`welcome` snapshot + `spawn`/`despawn` cache).
 9. Implement server snapshots/deltas and client-side interpolation.
-   - status: `pending`
+   - status: `done`
+   - completed: `2026-02-26`
+   - notes: Server now sends periodic full `snapshot` replication and tick-level `delta` updates for changed players. Client consumes `snapshot`/`delta` messages, buffers authoritative samples, and renders local player position using time-delayed interpolation to reduce jitter.
 10. Add multiplayer spawn/despawn rendering for multiple players.
    - status: `pending`
 

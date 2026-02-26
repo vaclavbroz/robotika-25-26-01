@@ -22,9 +22,9 @@ You should see prefixed logs in the same terminal:
 
 ## Verify Server Connect/Disconnect Logs
 
-Current browser client is still local-only (no websocket connect yet), so opening the page alone will not show server "connected" logs.
+Open the client URL shown in `[client]` logs (typically `http://localhost:5173/`) to trigger a WebSocket connect.
 
-Use this temporary smoke client in another terminal while stack is running:
+You can also use this temporary smoke client in another terminal while stack is running:
 
 ```bash
 node -e 'const ws=new WebSocket("ws://127.0.0.1:2567");ws.onmessage=(e)=>{console.log(e.data);setTimeout(()=>ws.close(),1000);};'
