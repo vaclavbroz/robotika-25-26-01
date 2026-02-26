@@ -23,6 +23,7 @@ const INPUT_BUTTON_BACKWARD = 1 << 2;
 const INPUT_BUTTON_LEFT = 1 << 3;
 const INPUT_BUTTON_RIGHT = 1 << 4;
 const DEBUG_NET = new URLSearchParams(window.location.search).get("debugNet") === "1";
+const WS_PORT = parsePort(import.meta.env.VITE_WS_PORT, 8010);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x87c9ff);
@@ -299,7 +300,7 @@ animate();
 function connectToServer() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const host = window.location.hostname || "127.0.0.1";
-  const url = `${protocol}://${host}:2567`;
+  const url = `${protocol}://${host}:${WS_PORT}`;
 
   setHelpStatus(`Connecting as ${net.nickname} to ${url}...`, "Connecting");
   net.connecting = true;
@@ -352,7 +353,7 @@ function connectToServer() {
   socket.addEventListener("error", () => {
     net.connecting = false;
     updateConnectUi();
-    setHelpStatus("Connection error. Ensure server is running on port 2567.", "Connection Error");
+    setHelpStatus(`Connection error. Ensure server is running on port ${WS_PORT}.`, "Connection Error");
   });
 }
 
@@ -1252,6 +1253,14 @@ function sanitizeAvatarPattern(rawPattern) {
     return DEFAULT_AVATAR_PATTERN;
   }
   return AVATAR_PATTERNS.has(rawPattern) ? rawPattern : DEFAULT_AVATAR_PATTERN;
+}
+
+function parsePort(value, fallback) {
+  const parsed = Number(value);
+  if (Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535) {
+    return parsed;
+  }
+  return fallback;
 }
 
 function drawRoundRect(ctx, x, y, width, height, radius) {

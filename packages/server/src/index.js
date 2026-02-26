@@ -1,6 +1,9 @@
 import { createServer } from "node:http";
 import { createHash, randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WorldState } from "./world-state.js";
 
 const TICK_HZ = 20;
@@ -29,8 +32,9 @@ const SIMULATION_CONFIG = {
   playerCollisionIterations: 3,
 };
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-const PORT = Number(process.env.PORT || 2567);
+const PORT = Number(process.env.PORT || 8010);
 const HOST = process.env.HOST || "0.0.0.0";
+const CLIENT_PORT = Number(process.env.CLIENT_PORT || 8000);
 
 const world = new WorldState();
 
@@ -74,18 +78,14 @@ server.on("upgrade", (req, socket) => {
 
 server.listen(PORT, HOST, () => {
   console.log(`[server] websocket gateway listening on ws://${HOST}:${PORT} (${TICK_HZ} Hz sim)`);
-  const lanIp = resolveLanIpv4();
-  const clientHost = lanIp || "127.0.0.1";
-  console.log(`[server] client url http://${clientHost}:5173`);
+  const clientHost = resolveClientHostForStartupUrl();
+  console.log(`[server] client url http://${clientHost}:${CLIENT_PORT}`);
 });
 
 setInterval(() => {
   world.simulateTick(SIM_DT_SECONDS, SIMULATION_CONFIG);
   broadcastReplicationUpdate();
   broadcastCollisionEvents();
-  if (world.tick % TICK_HZ === 0) {
-    console.log(`[server] alive tick=${world.tick} players=${world.getPlayerCount()}`);
-  }
 }, tickMs);
 
 function initPlayerSession(connection) {
@@ -420,4 +420,32 @@ function resolveLanIpv4() {
   }
 
   return preferred[0] || others[0] || null;
+}
+
+function resolveClientHostForStartupUrl() {
+  const fromFile = readExternalIpFromSetupFile();
+  if (fromFile) {
+    return fromFile;
+  }
+
+  const lanIp = resolveLanIpv4();
+  return lanIp || "127.0.0.1";
+}
+
+function readExternalIpFromSetupFile() {
+  const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+  const defaultPath = path.resolve(scriptDir, "../../../../setup/.wsl_external_ip");
+  const configuredPath = process.env.EXTERNAL_IP_FILE || defaultPath;
+
+  if (!existsSync(configuredPath)) {
+    return null;
+  }
+
+  try {
+    const raw = readFileSync(configuredPath, "utf8");
+    const value = raw.split(/\r?\n/)[0]?.trim();
+    return value || null;
+  } catch {
+    return null;
+  }
 }
