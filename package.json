@@ -7,7 +7,6 @@
     "dev": "node ./scripts/dev.mjs",
     "dev:client": "npm --prefix packages/client run dev",
     "dev:server": "npm --prefix packages/server run dev",
-    "dev:sandbox": "npm --prefix packages/sandbox run dev",
     "test": "node ./scripts/test.mjs"
   }
 }
