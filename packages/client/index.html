@@ -22,10 +22,12 @@
             <input id="color-input" type="color" value="#3c74d4" />
             <label for="pattern-select">Pattern</label>
             <select id="pattern-select">
-              <option value="solid">Solid</option>
               <option value="stripes">Stripes</option>
               <option value="checker">Checker</option>
             </select>
+            <div id="avatar-preview" aria-hidden="true">
+              <canvas id="avatar-preview-canvas" width="72" height="72"></canvas>
+            </div>
           </div>
         </div>
         <p id="help-text">WASD to move, SPACE to jump, mouse to look around.</p>

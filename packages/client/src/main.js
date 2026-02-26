@@ -3,18 +3,16 @@ import * as THREE from "three";
 const WORLD_SIZE = 500;
 const TERRAIN_SEGMENTS = 220;
 const PLAYER_HEIGHT = 1.55;
-const AVATAR_BODY_HEIGHT = 1.1;
-const AVATAR_BODY_RADIUS = 0.26;
-const AVATAR_HEAD_RADIUS = 0.2;
-const AVATAR_LABEL_Y = 1.82;
+const AVATAR_BALL_RADIUS = 0.75;
+const AVATAR_LABEL_Y = 1.15;
+const GROUND_CONTACT_VISUAL_BIAS = 0.03;
 const LABEL_PIXELS_TO_WORLD_X = 1.9 / 384;
 const LABEL_PIXELS_TO_WORLD_Y = 0.48 / 96;
-const MAX_HEAD_PITCH = THREE.MathUtils.degToRad(28);
-const HEAD_PITCH_BIAS = THREE.MathUtils.degToRad(14);
-const AVATAR_PATTERNS = new Set(["solid", "stripes", "checker"]);
+const AVATAR_PATTERNS = new Set(["stripes", "checker"]);
 const DEFAULT_AVATAR_COLOR = "#3c74d4";
-const DEFAULT_AVATAR_PATTERN = "solid";
+const DEFAULT_AVATAR_PATTERN = "stripes";
 const MAX_PITCH = THREE.MathUtils.degToRad(75);
+const FACE_PITCH_UP_BIAS = THREE.MathUtils.degToRad(4);
 const LOOK_AHEAD_DISTANCE = 16.0;
 const INPUT_SEND_HZ = 20;
 const INPUT_SEND_DT = 1 / INPUT_SEND_HZ;
@@ -113,6 +111,10 @@ const player = {
   pitch: 0,
 };
 
+const audio = {
+  context: null,
+};
+
 const net = {
   socket: null,
   connected: false,
@@ -138,6 +140,9 @@ const net = {
 
 const cameraTarget = new THREE.Vector3();
 const lookDirection = new THREE.Vector3();
+const rollDelta = new THREE.Vector3();
+const rollAxis = new THREE.Vector3();
+const rollQuat = new THREE.Quaternion();
 let dragLookActive = false;
 let hasEverCapturedPointer = false;
 
@@ -148,6 +153,7 @@ const nickInput = document.getElementById("nick-input");
 const connectButton = document.getElementById("connect-btn");
 const colorInput = document.getElementById("color-input");
 const patternSelect = document.getElementById("pattern-select");
+const avatarPreviewCanvas = document.getElementById("avatar-preview-canvas");
 
 const onKey = (pressed) => (event) => {
   switch (event.code) {
@@ -181,6 +187,7 @@ function lockPointer() {
   if (!net.connected) {
     return;
   }
+  ensureAudioContext();
   renderer.domElement.requestPointerLock();
 }
 
@@ -209,6 +216,12 @@ if (nickInput) {
       startConnectFromUi();
     }
   });
+}
+if (colorInput) {
+  colorInput.addEventListener("input", onAvatarOptionsChanged);
+}
+if (patternSelect) {
+  patternSelect.addEventListener("change", onAvatarOptionsChanged);
 }
 
 document.addEventListener("pointerlockchange", () => {
@@ -394,6 +407,11 @@ function onServerMessage(message) {
   if (message.type === "state") {
     const nextPlayers = Array.isArray(message.players) ? message.players : [];
     applyServerPlayerStates(nextPlayers, message.tick);
+    return;
+  }
+
+  if (message.type === "collisions") {
+    handleCollisionAudio(message.collisions);
   }
 }
 
@@ -519,7 +537,7 @@ function syncLocalPlayerFromServer() {
   const x = sample ? sample.x : Number(authoritative.position.x) || 0;
   const z = sample ? sample.z : Number(authoritative.position.z) || 0;
   const y = sample ? sample.y : Number(authoritative.position.y) || 0;
-  const terrainY = terrainHeight(x, z);
+  const terrainY = terrainBaseForSphereAt(x, z, AVATAR_BALL_RADIUS);
   const worldY = terrainY + Math.max(0, y);
   player.position.set(x, worldY + PLAYER_HEIGHT, z);
 }
@@ -539,14 +557,19 @@ function syncRenderedPlayersFromServer() {
     const x = Number(position.x) || 0;
     const y = Number(position.y) || 0;
     const z = Number(position.z) || 0;
-    const terrainY = terrainHeight(x, z);
+    const terrainY = terrainBaseForSphereAt(x, z, AVATAR_BALL_RADIUS);
     const worldY = terrainY + Math.max(0, y);
     const avatar = getOrCreatePlayerAvatar(playerId);
-    avatar.root.position.set(x, worldY, z);
+    avatar.root.position.set(x, worldY + AVATAR_BALL_RADIUS, z);
+    updateAvatarRolling(avatar);
     const yaw = Number(state?.yaw) || 0;
     const pitch = Number(state?.pitch) || 0;
-    avatar.root.rotation.y = -yaw;
-    avatar.head.rotation.x = THREE.MathUtils.clamp(HEAD_PITCH_BIAS + pitch * 0.45, -MAX_HEAD_PITCH, MAX_HEAD_PITCH);
+    avatar.face.rotation.set(
+      THREE.MathUtils.clamp(pitch, -MAX_PITCH, MAX_PITCH) + FACE_PITCH_UP_BIAS,
+      -yaw,
+      0,
+      "YXZ",
+    );
     applyAvatarAppearance(avatar, state?.avatar);
     updateAvatarLabel(avatar, state?.name);
   }
@@ -559,50 +582,65 @@ function getOrCreatePlayerAvatar(playerId) {
   }
 
   const root = new THREE.Group();
+  const ball = new THREE.Group();
+  root.add(ball);
 
-  const bodyGeometry = new THREE.CapsuleGeometry(
-    AVATAR_BODY_RADIUS,
-    AVATAR_BODY_HEIGHT - AVATAR_BODY_RADIUS * 2,
-    4,
-    10,
-  );
+  const bodyGeometry = new THREE.SphereGeometry(AVATAR_BALL_RADIUS, 28, 22);
   const bodyMaterial = new THREE.MeshStandardMaterial({
     color: 0xffffff,
     roughness: 0.42,
     metalness: 0.08,
   });
   const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-  body.position.y = AVATAR_BODY_HEIGHT * 0.5;
   body.castShadow = true;
-  root.add(body);
+  ball.add(body);
 
-  const head = new THREE.Group();
-  head.position.y = AVATAR_BODY_HEIGHT + AVATAR_HEAD_RADIUS * 0.92;
-  root.add(head);
+  const face = new THREE.Group();
+  root.add(face);
 
-  const headGeometry = new THREE.SphereGeometry(AVATAR_HEAD_RADIUS, 18, 14);
-  const headMaterial = new THREE.MeshStandardMaterial({
-    color: 0xf3d5b0,
-    roughness: 0.78,
+  const eyeGeometry = new THREE.SphereGeometry(0.1, 16, 14);
+  const eyeMaterial = new THREE.MeshStandardMaterial({
+    color: 0xf6fbff,
+    emissive: 0x93cfff,
+    emissiveIntensity: 0.65,
+    roughness: 0.18,
     metalness: 0.02,
   });
-  const headMesh = new THREE.Mesh(headGeometry, headMaterial);
-  headMesh.castShadow = true;
-  head.add(headMesh);
-
-  const eyeGeometry = new THREE.SphereGeometry(0.042, 12, 10);
-  const eyeMaterial = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.35, metalness: 0.05 });
   const leftEye = new THREE.Mesh(eyeGeometry, eyeMaterial);
-  leftEye.position.set(-0.075, 0.04, -AVATAR_HEAD_RADIUS + 0.02);
+  leftEye.position.set(-0.23, 0.13, -AVATAR_BALL_RADIUS + 0.03);
   const rightEye = leftEye.clone();
-  rightEye.position.x = 0.07;
-  head.add(leftEye, rightEye);
+  rightEye.position.x = 0.23;
+  face.add(leftEye, rightEye);
 
-  const mouthGeometry = new THREE.BoxGeometry(0.11, 0.02, 0.02);
-  const mouthMaterial = new THREE.MeshStandardMaterial({ color: 0x6f2d2d, roughness: 0.5, metalness: 0.02 });
+  const mouthGeometry = new THREE.BoxGeometry(0.34, 0.07, 0.028);
+  const mouthMaterial = new THREE.MeshStandardMaterial({ color: 0xc77b82, roughness: 0.28, metalness: 0.02 });
   const mouth = new THREE.Mesh(mouthGeometry, mouthMaterial);
-  mouth.position.set(0, -0.07, -AVATAR_HEAD_RADIUS + 0.02);
-  head.add(mouth);
+  mouth.position.set(0, -0.2, -AVATAR_BALL_RADIUS + 0.043);
+  mouth.rotation.z = 0.05;
+  face.add(mouth);
+
+  const toothGeometry = new THREE.BoxGeometry(0.05, 0.07, 0.025);
+  const toothMaterial = new THREE.MeshStandardMaterial({ color: 0xf8fbff, roughness: 0.2, metalness: 0.01 });
+  const leftTooth = new THREE.Mesh(toothGeometry, toothMaterial);
+  leftTooth.position.set(-0.07, -0.19, -AVATAR_BALL_RADIUS + 0.052);
+  leftTooth.rotation.z = 0.1;
+  const midTooth = leftTooth.clone();
+  midTooth.position.x = 0;
+  midTooth.rotation.z = 0;
+  const rightTooth = leftTooth.clone();
+  rightTooth.position.x = 0.07;
+  rightTooth.rotation.z = -0.1;
+  face.add(leftTooth, midTooth, rightTooth);
+
+  const browGeometry = new THREE.BoxGeometry(0.2, 0.03, 0.03);
+  const browMaterial = new THREE.MeshStandardMaterial({ color: 0x101010, roughness: 0.45, metalness: 0.02 });
+  const leftBrow = new THREE.Mesh(browGeometry, browMaterial);
+  leftBrow.position.set(-0.23, 0.27, -AVATAR_BALL_RADIUS + 0.045);
+  leftBrow.rotation.z = -0.55;
+  const rightBrow = leftBrow.clone();
+  rightBrow.position.x = 0.23;
+  rightBrow.rotation.z = 0.55;
+  face.add(leftBrow, rightBrow);
 
   const label = createAvatarLabelSprite();
   label.position.set(0, AVATAR_LABEL_Y, 0);
@@ -611,7 +649,8 @@ function getOrCreatePlayerAvatar(playerId) {
   scene.add(root);
   const avatar = {
     root,
-    head,
+    ball,
+    face,
     bodyMaterial,
     label,
     labelTexture: label.material.map,
@@ -620,9 +659,121 @@ function getOrCreatePlayerAvatar(playerId) {
     labelName: "",
     appearanceKey: "",
     bodyPatternTexture: null,
+    rollingReady: false,
   };
   net.playerAvatarsById.set(playerId, avatar);
   return avatar;
+}
+
+function updateAvatarRolling(avatar) {
+  if (!avatar.rollingReady) {
+    avatar.rollingReady = true;
+    avatar.lastX = avatar.root.position.x;
+    avatar.lastZ = avatar.root.position.z;
+    return;
+  }
+
+  const dx = avatar.root.position.x - avatar.lastX;
+  const dz = avatar.root.position.z - avatar.lastZ;
+  avatar.lastX = avatar.root.position.x;
+  avatar.lastZ = avatar.root.position.z;
+
+  rollDelta.set(dx, 0, dz);
+  const distance = rollDelta.length();
+  if (distance <= 1e-6) {
+    return;
+  }
+
+  rollAxis.set(rollDelta.z, 0, -rollDelta.x).normalize();
+  const angle = distance / AVATAR_BALL_RADIUS;
+  rollQuat.setFromAxisAngle(rollAxis, angle);
+  avatar.ball.quaternion.premultiply(rollQuat);
+}
+
+function handleCollisionAudio(rawCollisions) {
+  if (!Array.isArray(rawCollisions) || rawCollisions.length === 0) {
+    return;
+  }
+
+  const context = ensureAudioContext();
+  if (!context || context.state !== "running") {
+    return;
+  }
+
+  const listenerX = player.position.x;
+  const listenerY = player.position.y;
+  const listenerZ = player.position.z;
+  const maxDistance = 36;
+
+  for (const collision of rawCollisions) {
+    if (!collision || typeof collision !== "object") {
+      continue;
+    }
+
+    const x = Number(collision.x) || 0;
+    const y = Number(collision.y) || 0;
+    const z = Number(collision.z) || 0;
+    const intensity = Number(collision.intensity) || 0;
+    if (intensity <= 0) {
+      continue;
+    }
+
+    const distance = Math.hypot(x - listenerX, y - listenerY, z - listenerZ);
+    if (distance > maxDistance) {
+      continue;
+    }
+
+    const distanceGain = THREE.MathUtils.clamp(1 - distance / maxDistance, 0, 1);
+    const gain = THREE.MathUtils.clamp(distanceGain * distanceGain * (0.08 + intensity * 0.065), 0, 0.42);
+    if (gain <= 0.001) {
+      continue;
+    }
+
+    playCollisionClick(context, gain, intensity);
+  }
+}
+
+function ensureAudioContext() {
+  if (!audio.context) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) {
+      return null;
+    }
+    audio.context = new AudioCtx();
+  }
+
+  if (audio.context.state === "suspended") {
+    audio.context.resume().catch(() => {});
+  }
+
+  return audio.context;
+}
+
+function playCollisionClick(context, gainAmount, intensity) {
+  const now = context.currentTime;
+  const duration = 0.055;
+  const oscillator = context.createOscillator();
+  const gainNode = context.createGain();
+  const highpass = context.createBiquadFilter();
+  const pitch = 220 + Math.min(420, intensity * 120);
+
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(pitch, now);
+  oscillator.frequency.exponentialRampToValueAtTime(Math.max(90, pitch * 0.58), now + duration);
+
+  highpass.type = "highpass";
+  highpass.frequency.setValueAtTime(110, now);
+
+  gainNode.gain.setValueAtTime(0.0001, now);
+  gainNode.gain.exponentialRampToValueAtTime(gainAmount, now + 0.006);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+  oscillator.connect(highpass);
+  highpass.connect(gainNode);
+  gainNode.connect(context.destination);
+
+  oscillator.start(now);
+  oscillator.stop(now + duration + 0.01);
 }
 
 function applyAvatarAppearance(avatar, rawAvatarStyle) {
@@ -637,13 +788,6 @@ function applyAvatarAppearance(avatar, rawAvatarStyle) {
   if (avatar.bodyPatternTexture) {
     avatar.bodyPatternTexture.dispose();
     avatar.bodyPatternTexture = null;
-  }
-
-  if (pattern === "solid") {
-    avatar.bodyMaterial.map = null;
-    avatar.bodyMaterial.color.set(colorHex);
-    avatar.bodyMaterial.needsUpdate = true;
-    return;
   }
 
   const texture = createAvatarBodyTexture(colorHex, pattern);
@@ -679,7 +823,7 @@ function createAvatarBodyTexture(colorHex, pattern) {
     for (let x = stripe; x < size; x += stripe * 2) {
       ctx.fillRect(x, 0, Math.max(2, Math.floor(stripe * 0.24)), size);
     }
-  } else {
+  } else if (pattern === "checker") {
     const cell = 14;
     for (let y = 0; y < size; y += cell) {
       for (let x = 0; x < size; x += cell) {
@@ -870,6 +1014,7 @@ function initConnectUi() {
   if (patternSelect) {
     patternSelect.value = net.avatarPattern;
   }
+  renderAvatarPreview(net.avatarColor, net.avatarPattern);
   updateConnectUi();
   setHelpStatus("Enter nickname and connect. Then click panel or press L to capture mouse.", "Ready");
 }
@@ -878,9 +1023,11 @@ function startConnectFromUi() {
   if (net.connected || net.connecting) {
     return;
   }
+  ensureAudioContext();
   net.nickname = sanitizeNickname(nickInput?.value);
   net.avatarColor = normalizeAvatarColor(colorInput?.value);
   net.avatarPattern = sanitizeAvatarPattern(patternSelect?.value);
+  renderAvatarPreview(net.avatarColor, net.avatarPattern);
   if (nickInput) {
     nickInput.value = net.nickname;
   }
@@ -894,6 +1041,67 @@ function startConnectFromUi() {
   window.localStorage.setItem("hra.avatarColor", net.avatarColor);
   window.localStorage.setItem("hra.avatarPattern", net.avatarPattern);
   connectToServer();
+}
+
+function onAvatarOptionsChanged() {
+  const color = normalizeAvatarColor(colorInput?.value);
+  const pattern = sanitizeAvatarPattern(patternSelect?.value);
+  renderAvatarPreview(color, pattern);
+}
+
+function renderAvatarPreview(colorHex, pattern) {
+  if (!(avatarPreviewCanvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+
+  const ctx = avatarPreviewCanvas.getContext("2d");
+  if (!ctx) {
+    return;
+  }
+
+  const size = avatarPreviewCanvas.width;
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(size * 0.5, size * 0.5, size * 0.5 - 1, 0, Math.PI * 2);
+  ctx.clip();
+
+  const base = new THREE.Color(colorHex);
+  const dark = base.clone().multiplyScalar(0.42);
+  const light = base.clone().lerp(new THREE.Color(0xffffff), 0.16);
+
+  ctx.fillStyle = `#${base.getHexString()}`;
+  ctx.fillRect(0, 0, size, size);
+
+  if (pattern === "stripes") {
+    const stripe = 10;
+    ctx.fillStyle = `#${dark.getHexString()}`;
+    for (let x = 0; x < size; x += stripe * 2) {
+      ctx.fillRect(x, 0, stripe, size);
+    }
+    ctx.fillStyle = `#${light.getHexString()}`;
+    for (let x = stripe; x < size; x += stripe * 2) {
+      ctx.fillRect(x, 0, 2, size);
+    }
+  } else if (pattern === "checker") {
+    const cell = 9;
+    ctx.fillStyle = `#${dark.getHexString()}`;
+    for (let y = 0; y < size; y += cell) {
+      for (let x = 0; x < size; x += cell) {
+        if (((x / cell) + (y / cell)) % 2 === 0) {
+          ctx.fillRect(x, y, cell, cell);
+        }
+      }
+    }
+  }
+
+  const gloss = ctx.createRadialGradient(size * 0.34, size * 0.28, 2, size * 0.34, size * 0.28, size * 0.46);
+  gloss.addColorStop(0, "rgba(255,255,255,0.42)");
+  gloss.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = gloss;
+  ctx.fillRect(0, 0, size, size);
+
+  ctx.restore();
 }
 
 function updateConnectUi() {
@@ -953,6 +1161,29 @@ function terrainHeight(x, z) {
   const ripples = fbm(x * 0.085, z * 0.085, 2, 2.0, 0.5) * 0.9;
 
   return mountains + hills + ripples;
+}
+
+function terrainBaseForSphereAt(x, z, radius) {
+  let requiredCenterY = terrainHeight(x, z) + radius;
+
+  const rings = [
+    { scale: 0.5, samples: 8 },
+    { scale: 0.95, samples: 12 },
+  ];
+
+  for (const ring of rings) {
+    const d = radius * ring.scale;
+    const centerLift = Math.sqrt(Math.max(0, radius * radius - d * d));
+    for (let i = 0; i < ring.samples; i += 1) {
+      const angle = (i / ring.samples) * Math.PI * 2;
+      const sx = x + Math.cos(angle) * d;
+      const sz = z + Math.sin(angle) * d;
+      const h = terrainHeight(sx, sz);
+      requiredCenterY = Math.max(requiredCenterY, h + centerLift);
+    }
+  }
+
+  return requiredCenterY - radius - GROUND_CONTACT_VISUAL_BIAS;
 }
 
 function fbm(x, z, octaves, lacunarity, gain) {

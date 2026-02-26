@@ -18,9 +18,14 @@ const SIMULATION_CONFIG = {
   groundY: 0,
   maxAcceleration: 55.0,
   maxSpeed: 9.0,
+  maxBumpSpeed: 13.0,
   airControl: 0.35,
-  friction: 10.0,
+  friction: 16.0,
+  airFriction: 2.0,
   worldHalfExtent: 248.0,
+  playerCollisionRadius: 0.75,
+  playerCollisionRestitution: 0.93,
+  playerCollisionIterations: 3,
 };
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const PORT = Number(process.env.PORT || 2567);
@@ -73,6 +78,7 @@ server.listen(PORT, HOST, () => {
 setInterval(() => {
   world.simulateTick(SIM_DT_SECONDS, SIMULATION_CONFIG);
   broadcastReplicationUpdate();
+  broadcastCollisionEvents();
   if (world.tick % TICK_HZ === 0) {
     console.log(`[server] alive tick=${world.tick} players=${world.getPlayerCount()}`);
   }
@@ -161,6 +167,18 @@ function broadcastReplicationUpdate() {
     type: "delta",
     tick: world.tick,
     players: changedPlayers,
+  });
+}
+
+function broadcastCollisionEvents() {
+  if (!Array.isArray(world.recentCollisions) || world.recentCollisions.length === 0) {
+    return;
+  }
+
+  broadcastJson({
+    type: "collisions",
+    tick: world.tick,
+    collisions: world.recentCollisions.slice(0, 24),
   });
 }
 

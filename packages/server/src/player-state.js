@@ -45,7 +45,7 @@ export class PlayerState {
       pitch: 0,
       avatar: {
         color: "#3c74d4",
-        pattern: "solid",
+        pattern: "stripes",
       },
     });
   }
@@ -90,20 +90,15 @@ export class PlayerState {
 
   simulateTick(dtSeconds, config) {
     const control = this.onGround ? 1 : config.airControl;
-    const maxAccelStep = config.maxAcceleration * control * dtSeconds;
-    const desiredVelocityX = this.moveX * config.maxSpeed;
-    const desiredVelocityZ = this.moveZ * config.maxSpeed;
+    const accelStep = config.maxAcceleration * control * dtSeconds;
 
-    this.velocity.x += clamp(desiredVelocityX - this.velocity.x, -maxAccelStep, maxAccelStep);
-    this.velocity.z += clamp(desiredVelocityZ - this.velocity.z, -maxAccelStep, maxAccelStep);
+    this.velocity.x += this.moveX * accelStep;
+    this.velocity.z += this.moveZ * accelStep;
 
-    if (this.onGround && this.moveX === 0 && this.moveZ === 0) {
-      const frictionStep = config.friction * dtSeconds;
-      this.velocity.x = approachZero(this.velocity.x, frictionStep);
-      this.velocity.z = approachZero(this.velocity.z, frictionStep);
-    }
+    const friction = this.onGround ? config.friction : config.airFriction;
+    applyHorizontalFriction(this.velocity, friction * dtSeconds);
 
-    clampHorizontalSpeed(this.velocity, config.maxSpeed);
+    clampHorizontalSpeed(this.velocity, config.maxBumpSpeed ?? config.maxSpeed);
 
     const cooldown = Math.max(0, this.jumpCooldownRemaining - dtSeconds);
     this.jumpCooldownRemaining = cooldown;
@@ -128,6 +123,10 @@ export class PlayerState {
       this.onGround = false;
     }
 
+    this.enforceWorldBounds(config);
+  }
+
+  enforceWorldBounds(config) {
     const boundedX = clamp(this.position.x, -config.worldHalfExtent, config.worldHalfExtent);
     if (boundedX !== this.position.x) {
       this.position.x = boundedX;
@@ -170,11 +169,20 @@ function normalizeAngle(value) {
   return wrapped;
 }
 
-function approachZero(value, amount) {
-  if (Math.abs(value) <= amount) {
-    return 0;
+function applyHorizontalFriction(velocity, amount) {
+  const speed = Math.hypot(velocity.x, velocity.z);
+  if (speed === 0) {
+    return;
   }
-  return value > 0 ? value - amount : value + amount;
+  const reduced = Math.max(0, speed - amount);
+  if (reduced === 0) {
+    velocity.x = 0;
+    velocity.z = 0;
+    return;
+  }
+  const scale = reduced / speed;
+  velocity.x *= scale;
+  velocity.z *= scale;
 }
 
 function clampHorizontalSpeed(velocity, maxSpeed) {
@@ -207,8 +215,8 @@ function normalizeAvatarColor(rawColor) {
 }
 
 function sanitizeAvatarPattern(rawPattern) {
-  if (rawPattern === "stripes" || rawPattern === "checker" || rawPattern === "solid") {
+  if (rawPattern === "stripes" || rawPattern === "checker") {
     return rawPattern;
   }
-  return "solid";
+  return "stripes";
 }
