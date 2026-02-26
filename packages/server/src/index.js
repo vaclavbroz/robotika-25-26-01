@@ -1,0 +1,335 @@
+import { createServer } from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import { WorldState } from "./world-state.js";
+
+const TICK_HZ = 20;
+const tickMs = Math.round(1000 / TICK_HZ);
+const SIM_DT_SECONDS = 1 / TICK_HZ;
+const INPUT_BUTTON_JUMP = 1 << 0;
+const INPUT_BUTTON_FORWARD = 1 << 1;
+const INPUT_BUTTON_BACKWARD = 1 << 2;
+const INPUT_BUTTON_LEFT = 1 << 3;
+const INPUT_BUTTON_RIGHT = 1 << 4;
+const SIMULATION_CONFIG = {
+  gravity: 24.0,
+  jumpSpeed: 8.0,
+  jumpCooldownSeconds: 0.35,
+  groundY: 0,
+  maxAcceleration: 55.0,
+  maxSpeed: 9.0,
+  airControl: 0.35,
+  friction: 10.0,
+  worldHalfExtent: 248.0,
+};
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const PORT = Number(process.env.PORT || 2567);
+const HOST = process.env.HOST || "0.0.0.0";
+
+const world = new WorldState();
+
+const socketsByPlayerId = new Map();
+
+const server = createServer((req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, tick: world.tick, players: world.getPlayerCount() }));
+    return;
+  }
+
+  res.writeHead(404);
+  res.end();
+});
+
+server.on("upgrade", (req, socket) => {
+  const key = req.headers["sec-websocket-key"];
+  const upgrade = req.headers.upgrade;
+
+  if (typeof key !== "string" || upgrade?.toLowerCase() !== "websocket") {
+    socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+    socket.destroy();
+    return;
+  }
+
+  const acceptKey = createHash("sha1").update(key + WS_GUID).digest("base64");
+  const headers = [
+    "HTTP/1.1 101 Switching Protocols",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    `Sec-WebSocket-Accept: ${acceptKey}`,
+    "\r\n",
+  ];
+  socket.write(headers.join("\r\n"));
+
+  const connection = createConnection(socket);
+  initPlayerSession(connection);
+});
+
+server.listen(PORT, HOST, () => {
+  console.log(`[server] websocket gateway listening on ws://${HOST}:${PORT} (${TICK_HZ} Hz sim)`);
+});
+
+setInterval(() => {
+  world.simulateTick(SIM_DT_SECONDS, SIMULATION_CONFIG);
+  broadcastJson({
+    type: "state",
+    tick: world.tick,
+    players: Array.from(world.players.values()),
+  });
+  if (world.tick % TICK_HZ === 0) {
+    console.log(`[server] alive tick=${world.tick} players=${world.getPlayerCount()}`);
+  }
+}, tickMs);
+
+function initPlayerSession(connection) {
+  const playerId = randomUUID();
+  const playerState = world.createPlayer(playerId);
+  socketsByPlayerId.set(playerId, connection);
+  connection.playerId = playerId;
+
+  const snapshot = world.createSnapshot();
+
+  connection.sendJson({
+    type: "welcome",
+    playerId,
+    tickRate: TICK_HZ,
+    snapshot,
+  });
+
+  broadcastJson(
+    {
+      type: "spawn",
+      playerId,
+      state: playerState,
+    },
+    { excludePlayerId: playerId },
+  );
+
+  console.log(`[server] connected playerId=${playerId} players=${world.getPlayerCount()}`);
+}
+
+function cleanupPlayerSession(connection) {
+  if (connection.closed) {
+    return;
+  }
+
+  connection.closed = true;
+  const { playerId } = connection;
+  if (!playerId) {
+    return;
+  }
+
+  const removedPlayer = world.removePlayer(playerId);
+  socketsByPlayerId.delete(playerId);
+
+  if (removedPlayer) {
+    broadcastJson({ type: "despawn", playerId }, { excludePlayerId: playerId });
+    console.log(`[server] disconnected playerId=${playerId} players=${world.getPlayerCount()}`);
+  }
+}
+
+function broadcastJson(payload, options = {}) {
+  const encoded = JSON.stringify(payload);
+  for (const [playerId, connection] of socketsByPlayerId) {
+    if (options.excludePlayerId && playerId === options.excludePlayerId) {
+      continue;
+    }
+    connection.sendText(encoded);
+  }
+}
+
+function createConnection(socket) {
+  const connection = {
+    socket,
+    buffer: Buffer.alloc(0),
+    closed: false,
+    playerId: null,
+    sendJson(payload) {
+      this.sendText(JSON.stringify(payload));
+    },
+    sendText(text) {
+      if (this.closed || socket.destroyed) {
+        return;
+      }
+      socket.write(encodeFrame(Buffer.from(text, "utf8"), 0x1));
+    },
+  };
+
+  socket.on("data", (chunk) => {
+    if (connection.closed) {
+      return;
+    }
+    connection.buffer = Buffer.concat([connection.buffer, chunk]);
+    consumeFrames(connection, (opcode, payload) => onFrame(connection, opcode, payload));
+  });
+
+  socket.on("error", (error) => {
+    console.error(`[server] socket error playerId=${connection.playerId ?? "unknown"} ${error.message}`);
+  });
+
+  socket.on("close", () => cleanupPlayerSession(connection));
+  socket.on("end", () => cleanupPlayerSession(connection));
+  return connection;
+}
+
+function onFrame(connection, opcode, payload) {
+  if (opcode === 0x8) {
+    connection.socket.end(encodeFrame(payload, 0x8));
+    cleanupPlayerSession(connection);
+    return;
+  }
+
+  if (opcode === 0x9) {
+    connection.socket.write(encodeFrame(payload, 0xA));
+    return;
+  }
+
+  if (opcode !== 0x1) {
+    return;
+  }
+
+  let message;
+  try {
+    message = JSON.parse(payload.toString("utf8"));
+  } catch {
+    connection.sendJson({ type: "error", code: "bad_json" });
+    return;
+  }
+
+  if (!message || typeof message !== "object") {
+    connection.sendJson({ type: "error", code: "bad_message" });
+    return;
+  }
+
+  if (message.type === "hello") {
+    const player = world.getPlayer(connection.playerId);
+    if (player) {
+      player.setName(message.name);
+    }
+    return;
+  }
+
+  if (message.type === "jump") {
+    const player = world.getPlayer(connection.playerId);
+    if (player) {
+      player.requestJump();
+    }
+    return;
+  }
+
+  if (message.type === "input") {
+    const player = world.getPlayer(connection.playerId);
+    if (!player) {
+      return;
+    }
+
+    player.applyInput(parseInputMessage(message));
+  }
+}
+
+function parseInputMessage(message) {
+  const buttonsBitmask =
+    typeof message.buttonsBitmask === "number" && Number.isInteger(message.buttonsBitmask)
+      ? message.buttonsBitmask
+      : 0;
+
+  const forward = (buttonsBitmask & INPUT_BUTTON_FORWARD) !== 0 ? 1 : 0;
+  const backward = (buttonsBitmask & INPUT_BUTTON_BACKWARD) !== 0 ? 1 : 0;
+  const left = (buttonsBitmask & INPUT_BUTTON_LEFT) !== 0 ? 1 : 0;
+  const right = (buttonsBitmask & INPUT_BUTTON_RIGHT) !== 0 ? 1 : 0;
+
+  return {
+    moveX: right - left,
+    moveZ: forward - backward,
+    yaw: typeof message.yaw === "number" ? message.yaw : 0,
+    pitch: typeof message.pitch === "number" ? message.pitch : 0,
+    jumpRequested: (buttonsBitmask & INPUT_BUTTON_JUMP) !== 0,
+  };
+}
+
+function consumeFrames(connection, onMessage) {
+  let offset = 0;
+  const { buffer } = connection;
+
+  while (offset + 2 <= buffer.length) {
+    const byte1 = buffer[offset];
+    const byte2 = buffer[offset + 1];
+    const fin = (byte1 & 0x80) !== 0;
+    const opcode = byte1 & 0x0f;
+    const masked = (byte2 & 0x80) !== 0;
+
+    if (!fin || !masked) {
+      connection.sendJson({ type: "error", code: "protocol_violation" });
+      connection.socket.end();
+      connection.closed = true;
+      return;
+    }
+
+    let payloadLength = byte2 & 0x7f;
+    let headerBytes = 2;
+
+    if (payloadLength === 126) {
+      if (offset + 4 > buffer.length) {
+        break;
+      }
+      payloadLength = buffer.readUInt16BE(offset + 2);
+      headerBytes = 4;
+    } else if (payloadLength === 127) {
+      if (offset + 10 > buffer.length) {
+        break;
+      }
+      const lengthBig = buffer.readBigUInt64BE(offset + 2);
+      if (lengthBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+        connection.sendJson({ type: "error", code: "payload_too_large" });
+        connection.socket.end();
+        connection.closed = true;
+        return;
+      }
+      payloadLength = Number(lengthBig);
+      headerBytes = 10;
+    }
+
+    const frameTotal = headerBytes + 4 + payloadLength;
+    if (offset + frameTotal > buffer.length) {
+      break;
+    }
+
+    const maskStart = offset + headerBytes;
+    const payloadStart = maskStart + 4;
+    const maskingKey = buffer.subarray(maskStart, payloadStart);
+    const payload = Buffer.from(buffer.subarray(payloadStart, payloadStart + payloadLength));
+
+    for (let i = 0; i < payload.length; i += 1) {
+      payload[i] ^= maskingKey[i % 4];
+    }
+
+    onMessage(opcode, payload);
+    offset += frameTotal;
+  }
+
+  connection.buffer = buffer.subarray(offset);
+}
+
+function encodeFrame(payload, opcode) {
+  const payloadLength = payload.length;
+
+  if (payloadLength < 126) {
+    const header = Buffer.alloc(2);
+    header[0] = 0x80 | opcode;
+    header[1] = payloadLength;
+    return Buffer.concat([header, payload]);
+  }
+
+  if (payloadLength < 65536) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(payloadLength, 2);
+    return Buffer.concat([header, payload]);
+  }
+
+  const header = Buffer.alloc(10);
+  header[0] = 0x80 | opcode;
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(payloadLength), 2);
+  return Buffer.concat([header, payload]);
+}

@@ -1,0 +1,32 @@
+# Agent Instructions
+
+- Never run install commands on your own (for example: `npm install`, `npm i`, `pnpm install`, `yarn install`) unless the user explicitly asks for it.
+- Never run build commands on your own (for example: `npm run build`, `pnpm build`, `yarn build`) unless the user explicitly asks for it.
+- The long-term refactor plan based on `goal.md` is in `REFACTOR_PLAN.md`. During follow-up work, update step statuses (`pending`/`done`) there only.
+
+## Starting The Full Stack On Request
+
+- If the user asks to start the full stack, use the root script:
+  - `npm run dev`
+- This command starts all components in parallel:
+  - client (`packages/client`)
+  - server (`packages/server`)
+  - sandbox (`packages/sandbox`)
+- After startup, always report:
+  - client URL (typically `http://localhost:5173/`)
+  - confirmation that server and sandbox are also running (based on `[server]` and `[sandbox]` log prefixes)
+- If startup fails due to missing dependencies, suggest installation, but do not run it without explicit user approval.
+
+## Local Testing From Console
+
+- Preferred local startup command:
+  - `./start.sh`
+- This wraps `npm run dev` from repo root and shows all component logs in one terminal.
+- Expected log prefixes:
+  - `[client]` Vite startup + URL
+  - `[server]` websocket/tick + connect/disconnect lifecycle logs
+  - `[sandbox]` sandbox heartbeat logs
+- Current limitation:
+  - Opening the browser client alone does not yet connect to server WebSocket.
+- To verify server connect/disconnect logs manually while stack is up, use:
+  - `node -e 'const ws=new WebSocket("ws://127.0.0.1:2567");ws.onmessage=(e)=>{console.log(e.data);setTimeout(()=>ws.close(),1000);};'`
