@@ -5,6 +5,7 @@ const TERRAIN_SEGMENTS = 220;
 const PLAYER_HEIGHT = 1.55;
 const AVATAR_BALL_RADIUS = 0.75;
 const AVATAR_LABEL_Y = 1.15;
+const PARACHUTE_CANOPY_Y = 2.9;
 const GROUND_CONTACT_VISUAL_BIAS = 0.03;
 const LABEL_PIXELS_TO_WORLD_X = 1.9 / 384;
 const LABEL_PIXELS_TO_WORLD_Y = 0.48 / 96;
@@ -591,7 +592,7 @@ function syncRenderedPlayersFromServer() {
     const worldY = terrainY + Math.max(0, y);
     const avatar = getOrCreatePlayerAvatar(playerId);
     avatar.root.position.set(x, worldY + AVATAR_BALL_RADIUS, z);
-    updateAvatarRolling(avatar);
+    updateAvatarRolling(avatar, state?.parachuteActive === true);
     const yaw = Number(state?.yaw) || 0;
     const pitch = Number(state?.pitch) || 0;
     avatar.face.rotation.set(
@@ -600,6 +601,7 @@ function syncRenderedPlayersFromServer() {
       0,
       "YXZ",
     );
+    avatar.parachute.visible = state?.parachuteActive === true;
     applyAvatarAppearance(avatar, state?.avatar);
     updateAvatarLabel(avatar, state?.name);
   }
@@ -676,6 +678,10 @@ function getOrCreatePlayerAvatar(playerId) {
   label.position.set(0, AVATAR_LABEL_Y, 0);
   root.add(label);
 
+  const parachute = createParachute();
+  parachute.visible = false;
+  root.add(parachute);
+
   scene.add(root);
   const avatar = {
     root,
@@ -686,6 +692,7 @@ function getOrCreatePlayerAvatar(playerId) {
     labelTexture: label.material.map,
     labelCanvas: label.userData.labelCanvas,
     labelCtx: label.userData.labelCtx,
+    parachute,
     labelName: "",
     appearanceKey: "",
     bodyPatternTexture: null,
@@ -695,7 +702,7 @@ function getOrCreatePlayerAvatar(playerId) {
   return avatar;
 }
 
-function updateAvatarRolling(avatar) {
+function updateAvatarRolling(avatar, parachuteActive = false) {
   if (!avatar.rollingReady) {
     avatar.rollingReady = true;
     avatar.lastX = avatar.root.position.x;
@@ -708,6 +715,10 @@ function updateAvatarRolling(avatar) {
   avatar.lastX = avatar.root.position.x;
   avatar.lastZ = avatar.root.position.z;
 
+  if (parachuteActive) {
+    return;
+  }
+
   rollDelta.set(dx, 0, dz);
   const distance = rollDelta.length();
   if (distance <= 1e-6) {
@@ -718,6 +729,56 @@ function updateAvatarRolling(avatar) {
   const angle = distance / AVATAR_BALL_RADIUS;
   rollQuat.setFromAxisAngle(rollAxis, angle);
   avatar.ball.quaternion.premultiply(rollQuat);
+}
+
+function createParachute() {
+  const group = new THREE.Group();
+
+  const canopy = new THREE.Mesh(
+    new THREE.SphereGeometry(1.9, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.5),
+    new THREE.MeshStandardMaterial({
+      color: 0xfff1d6,
+      roughness: 0.72,
+      metalness: 0.02,
+      side: THREE.DoubleSide,
+    }),
+  );
+  canopy.position.y = PARACHUTE_CANOPY_Y;
+  canopy.scale.set(1, 0.62, 1);
+  canopy.castShadow = true;
+  group.add(canopy);
+
+  const stripeGeometry = new THREE.BoxGeometry(0.18, 0.04, 1.95);
+  const stripeMaterial = new THREE.MeshStandardMaterial({
+    color: 0xd95a43,
+    roughness: 0.58,
+    metalness: 0.04,
+  });
+  const stripeA = new THREE.Mesh(stripeGeometry, stripeMaterial);
+  stripeA.position.y = PARACHUTE_CANOPY_Y + 0.05;
+  stripeA.rotation.y = Math.PI / 3;
+  group.add(stripeA);
+  const stripeB = stripeA.clone();
+  stripeB.rotation.y = -Math.PI / 3;
+  group.add(stripeB);
+
+  const lineMaterial = new THREE.LineBasicMaterial({ color: 0xf4f8ff, transparent: true, opacity: 0.82 });
+  const anchors = [
+    [-0.52, 0.2, -0.52],
+    [0.52, 0.2, -0.52],
+    [-0.52, 0.2, 0.52],
+    [0.52, 0.2, 0.52],
+  ];
+
+  for (const [x, y, z] of anchors) {
+    const points = [
+      new THREE.Vector3(x, y, z),
+      new THREE.Vector3(x * 1.85, PARACHUTE_CANOPY_Y - 0.48, z * 1.85),
+    ];
+    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), lineMaterial));
+  }
+
+  return group;
 }
 
 function handleCollisionAudio(rawCollisions) {

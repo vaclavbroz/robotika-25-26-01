@@ -4,6 +4,7 @@ export class PlayerState {
     position,
     velocity,
     onGround,
+    parachuteActive,
     name,
     jumpRequested,
     jumpCooldownRemaining,
@@ -17,6 +18,7 @@ export class PlayerState {
     this.position = { ...position };
     this.velocity = { ...velocity };
     this.onGround = onGround;
+    this.parachuteActive = parachuteActive;
     this.name = name;
     this.jumpRequested = jumpRequested;
     this.jumpCooldownRemaining = jumpCooldownRemaining;
@@ -35,7 +37,8 @@ export class PlayerState {
       playerId,
       position: { x: 0, y: 0, z: 0 },
       velocity: { x: 0, y: 0, z: 0 },
-      onGround: true,
+      onGround: false,
+      parachuteActive: false,
       name: undefined,
       jumpRequested: false,
       jumpCooldownRemaining: 0,
@@ -89,28 +92,50 @@ export class PlayerState {
   }
 
   simulateTick(dtSeconds, config) {
-    const control = this.onGround ? 1 : config.airControl;
+    const control = this.parachuteActive
+      ? config.parachuteAirControl
+      : this.onGround
+        ? 1
+        : config.airControl;
     const accelStep = config.maxAcceleration * control * dtSeconds;
 
     this.velocity.x += this.moveX * accelStep;
     this.velocity.z += this.moveZ * accelStep;
 
-    const friction = this.onGround ? config.friction : config.airFriction;
+    const friction = this.parachuteActive
+      ? config.parachuteAirFriction
+      : this.onGround
+        ? config.friction
+        : config.airFriction;
     applyHorizontalFriction(this.velocity, friction * dtSeconds);
 
-    clampHorizontalSpeed(this.velocity, config.maxBumpSpeed ?? config.maxSpeed);
+    clampHorizontalSpeed(
+      this.velocity,
+      this.parachuteActive ? config.parachuteMaxHorizontalSpeed : config.maxBumpSpeed ?? config.maxSpeed,
+    );
 
     const cooldown = Math.max(0, this.jumpCooldownRemaining - dtSeconds);
     this.jumpCooldownRemaining = cooldown;
 
-    if (this.jumpRequested && this.onGround && this.jumpCooldownRemaining <= 0) {
+    if (
+      !this.parachuteActive &&
+      this.jumpRequested &&
+      this.onGround &&
+      this.jumpCooldownRemaining <= 0
+    ) {
       this.velocity.y = config.jumpSpeed;
       this.onGround = false;
       this.jumpCooldownRemaining = config.jumpCooldownSeconds;
     }
     this.jumpRequested = false;
 
-    this.velocity.y -= config.gravity * dtSeconds;
+    if (this.parachuteActive) {
+      const descentStep = config.parachuteVerticalBlend * dtSeconds;
+      this.velocity.y = moveTowards(this.velocity.y, -config.parachuteDescentSpeed, descentStep);
+    } else {
+      this.velocity.y -= config.gravity * dtSeconds;
+    }
+
     this.position.x += this.velocity.x * dtSeconds;
     this.position.y += this.velocity.y * dtSeconds;
     this.position.z += this.velocity.z * dtSeconds;
@@ -119,6 +144,7 @@ export class PlayerState {
       this.position.y = config.groundY;
       this.velocity.y = 0;
       this.onGround = true;
+      this.parachuteActive = false;
     } else {
       this.onGround = false;
     }
@@ -146,6 +172,7 @@ export class PlayerState {
       position: this.position,
       velocity: this.velocity,
       onGround: this.onGround,
+      parachuteActive: this.parachuteActive,
       name: this.name,
       yaw: this.yaw,
       pitch: this.pitch,
@@ -193,6 +220,16 @@ function clampHorizontalSpeed(velocity, maxSpeed) {
   const scale = maxSpeed / horizontalSpeed;
   velocity.x *= scale;
   velocity.z *= scale;
+}
+
+function moveTowards(current, target, maxDelta) {
+  if (!Number.isFinite(current) || !Number.isFinite(target) || !Number.isFinite(maxDelta)) {
+    return Number.isFinite(target) ? target : 0;
+  }
+  if (Math.abs(target - current) <= maxDelta) {
+    return target;
+  }
+  return current + Math.sign(target - current) * maxDelta;
 }
 
 function normalizeStick(x, z) {

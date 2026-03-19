@@ -26,6 +26,12 @@ const SIMULATION_CONFIG = {
   airControl: 0.35,
   friction: 16.0,
   airFriction: 2.0,
+  parachuteFlightDurationSeconds: 20.0,
+  parachuteDescentSpeed: 3.6,
+  parachuteVerticalBlend: 48.0,
+  parachuteAirControl: 0.9,
+  parachuteAirFriction: 5.5,
+  parachuteMaxHorizontalSpeed: 7.2,
   worldHalfExtent: 248.0,
   playerCollisionRadius: 0.75,
   playerCollisionRestitution: 0.93,
@@ -139,7 +145,7 @@ function shutdown(exitCode) {
 
 function initPlayerSession(connection) {
   const playerId = randomUUID();
-  const playerState = world.createPlayer(playerId);
+  const playerState = world.createPlayer(playerId, SIMULATION_CONFIG);
   socketsByPlayerId.set(playerId, connection);
   connection.playerId = playerId;
 

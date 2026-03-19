@@ -28,8 +28,11 @@ export class WorldState {
     return this.tick;
   }
 
-  createPlayer(playerId) {
+  createPlayer(playerId, config = {}) {
     const player = PlayerState.createInitial(playerId);
+    player.position.y = Math.max(0, configSpawnHeightFromFlight(config));
+    player.parachuteActive = player.position.y > (config.groundY ?? 0);
+    player.onGround = !player.parachuteActive;
     this.players.set(playerId, player);
     return player;
   }
@@ -189,8 +192,15 @@ function enforceGroundContact(player, config) {
       player.velocity.y = 0;
     }
     player.onGround = true;
+    player.parachuteActive = false;
     return;
   }
 
   player.onGround = false;
+}
+
+function configSpawnHeightFromFlight(config) {
+  const duration = Number(config.parachuteFlightDurationSeconds) || 0;
+  const descentSpeed = Number(config.parachuteDescentSpeed) || 0;
+  return duration * descentSpeed;
 }
