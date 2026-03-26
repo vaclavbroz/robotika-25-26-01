@@ -26,7 +26,7 @@ const SIMULATION_CONFIG = {
   airControl: 0.35,
   friction: 16.0,
   airFriction: 2.0,
-  parachuteFlightDurationSeconds: 20.0,
+  parachuteFlightDurationSeconds: 0,
   parachuteDescentSpeed: 3.6,
   parachuteVerticalBlend: 48.0,
   parachuteAirControl: 0.9,
@@ -38,12 +38,13 @@ const SIMULATION_CONFIG = {
   playerCollisionIterations: 3,
 };
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-const PORT = Number(process.env.PORT || 8010);
+const PORT = Number(process.env.PORT || 9001);
 const HOST = process.env.HOST || "0.0.0.0";
-const CLIENT_PORT = Number(process.env.CLIENT_PORT || 8000);
+const CLIENT_PORT = Number(process.env.CLIENT_PORT || 8001);
 const DEV_AUTO_RESTART = process.env.DEV_AUTO_RESTART === "1";
 const DEV_RESTART_NOTICE_MS = Number(process.env.DEV_RESTART_NOTICE_MS || 1400);
 const DEV_RESTART_SHUTDOWN_GRACE_MS = 250;
+const QUIET_STARTUP_LOGS = process.env.QUIET_STARTUP_LOGS === "1";
 
 const world = new WorldState();
 
@@ -86,9 +87,11 @@ server.on("upgrade", (req, socket) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`[server] websocket gateway listening on ws://${HOST}:${PORT} (${TICK_HZ} Hz sim)`);
-  const clientHost = resolveClientHostForStartupUrl();
-  console.log(`[server] client url http://${clientHost}:${CLIENT_PORT}`);
+  if (!QUIET_STARTUP_LOGS) {
+    console.log(`[server] websocket gateway listening on ws://${HOST}:${PORT} (${TICK_HZ} Hz sim)`);
+    const clientHost = resolveClientHostForStartupUrl();
+    console.log(`[server] client url http://${clientHost}:${CLIENT_PORT}`);
+  }
 });
 
 const simulationTimer = setInterval(() => {
@@ -489,7 +492,7 @@ function resolveClientHostForStartupUrl() {
 
 function readExternalIpFromSetupFile() {
   const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-  const defaultPath = path.resolve(scriptDir, "../../../../setup/.wsl_external_ip");
+  const defaultPath = path.resolve(scriptDir, "../../../../.ip");
   const configuredPath = process.env.EXTERNAL_IP_FILE || defaultPath;
 
   if (!existsSync(configuredPath)) {

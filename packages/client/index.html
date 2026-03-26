@@ -3,12 +3,63 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>3D Terrain Walker</title>
+    <title>99 Nights In The Desert</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
     <div id="hud">
       <div id="crosshair">+</div>
+      <div id="lobby-screen">
+        <div id="lobby-panel">
+          <h2>Desert Lobby</h2>
+          <p id="lobby-coins">Coins 6</p>
+          <div id="class-grid">
+            <button class="class-card" data-class-id="nomad" type="button">Nomad<br />Free</button>
+            <button class="class-card" data-class-id="scout" type="button">Scout<br />3 Coins</button>
+            <button class="class-card" data-class-id="tank" type="button">Tank<br />4 Coins</button>
+            <button class="class-card" data-class-id="engineer" type="button">Engineer<br />5 Coins</button>
+          </div>
+          <p id="lobby-class-text">Selected class: Nomad</p>
+          <p id="lobby-tip">Buy a class, then join the desert.</p>
+          <button id="lobby-join-btn" type="button">Join Game</button>
+        </div>
+      </div>
+      <div id="game-panel">
+        <div id="game-phase">Day 0</div>
+        <div id="game-status">Reach the camp marker and prepare the fire.</div>
+        <div id="game-stats">
+          <span id="health-stat">Health 100</span>
+          <span id="fire-stat">Fire 65</span>
+          <span id="wood-stat">Boards 0</span>
+          <span id="ember-stat">Sack 0 / 6</span>
+          <span id="gun-stat">Guns 0</span>
+          <span id="craft-stat">Barricades 0</span>
+          <span id="chest-stat">Chests 0</span>
+          <span id="night-stat">Night 0 / 99</span>
+        </div>
+      </div>
+      <div id="inventory-panel">
+        <h3>Inventory</h3>
+        <div id="inventory-grid">
+          <span id="inv-boards">Boards 0</span>
+          <span id="inv-guns">Guns 0</span>
+          <span id="inv-barricades">Barricades 0</span>
+          <span id="inv-chests">Chest Kits 0</span>
+          <span id="inv-coins">Coins 0</span>
+        </div>
+      </div>
+      <div id="chest-overlay" hidden>
+        <div id="chest-panel">
+          <h3 id="chest-title">Chest</h3>
+          <p id="chest-summary">Stored boards 0</p>
+          <div id="chest-actions">
+            <button id="chest-store-btn" type="button">Store Board</button>
+            <button id="chest-take-btn" type="button">Take Board</button>
+            <button id="chest-close-btn" type="button">Close</button>
+          </div>
+        </div>
+      </div>
+      <div id="interaction-prompt" hidden>Press E to interact</div>
       <div id="dev-overlay" hidden>
         <div id="dev-overlay-panel">
           <h2 id="dev-overlay-title">Updating</h2>
@@ -16,15 +67,15 @@
         </div>
       </div>
       <div id="help">
-        <h1 id="help-title">Click to Play</h1>
+        <h1 id="help-title">99 Nights In The Desert</h1>
         <div id="connect-panel">
-          <label for="nick-input">Nickname</label>
+          <label for="nick-input">Nomad Name</label>
           <div id="connect-row">
-            <input id="nick-input" type="text" maxlength="20" placeholder="pilot" />
-            <button id="connect-btn" type="button">Connect</button>
+            <input id="nick-input" type="text" maxlength="20" placeholder="nomad" />
+            <button id="connect-btn" type="button">Enter Desert</button>
           </div>
           <div id="avatar-row">
-            <label for="color-input">Color</label>
+            <label for="color-input">Wrap</label>
             <input id="color-input" type="color" value="#3c74d4" />
             <label for="pattern-select">Pattern</label>
             <select id="pattern-select">
@@ -36,7 +87,7 @@
             </div>
           </div>
         </div>
-        <p id="help-text">WASD to move, SPACE to jump, mouse to look around.</p>
+        <p id="help-text">WASD to move, SPACE to hop, mouse to scan the dunes. Find the armadillo camp marker.</p>
       </div>
     </div>
     <script type="module" src="/src/main.js"></script>

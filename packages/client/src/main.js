@@ -12,6 +12,34 @@ const LABEL_PIXELS_TO_WORLD_Y = 0.48 / 96;
 const AVATAR_PATTERNS = new Set(["stripes", "checker"]);
 const DEFAULT_AVATAR_COLOR = "#3c74d4";
 const DEFAULT_AVATAR_PATTERN = "stripes";
+const DESERT_CAMP_POSITION = new THREE.Vector3(34, 0, -28);
+const CRAFTING_TABLE_OFFSET = new THREE.Vector3(6, 0, 4);
+const TOTAL_NIGHTS_TO_SURVIVE = 99;
+const DAY_DURATION_SECONDS = 3;
+const NIGHT_DURATION_SECONDS = 5;
+const CAMP_INTERACT_RANGE = 7;
+const RESOURCE_INTERACT_RANGE = 4.2;
+const ENEMY_CONTACT_RANGE = 2.1;
+const FIRE_SAFE_RADIUS = 8.5;
+const PLAYER_MAX_HEALTH = 100;
+const FIRE_MAX_FUEL = 100;
+const STARTING_FIRE_FUEL = 65;
+const FIRE_DRAIN_PER_SECOND = 3.1;
+const FIRE_FEED_AMOUNT = 22;
+const SACK_CAPACITY = 6;
+const BARRICADE_CRAFT_COST = 2;
+const CHEST_CRAFT_COST = 3;
+const BARRICADE_MAX_HEALTH = 90;
+const CHEST_MAX_HEALTH = 120;
+const BARRICADE_SLOW_RADIUS = 3.2;
+const STRUCTURE_INTERACT_RANGE = 5.4;
+const PLAYER_DAMAGE_PER_SECOND = 16;
+const GUN_RANGE = 34;
+const GUN_CONE_DOT = 0.94;
+const ENEMY_SPAWN_INTERVAL_SECONDS = 1.5;
+const RESOURCE_RESPAWN_SECONDS = 9;
+const ARMADILLO_DAMAGE_PER_SECOND = 28;
+const ARMADILLO_WAKE_RANGE = 90;
 const MAX_PITCH = THREE.MathUtils.degToRad(75);
 const FACE_PITCH_UP_BIAS = THREE.MathUtils.degToRad(4);
 const LOOK_AHEAD_DISTANCE = 16.0;
@@ -24,11 +52,11 @@ const INPUT_BUTTON_BACKWARD = 1 << 2;
 const INPUT_BUTTON_LEFT = 1 << 3;
 const INPUT_BUTTON_RIGHT = 1 << 4;
 const DEBUG_NET = new URLSearchParams(window.location.search).get("debugNet") === "1";
-const WS_PORT = parsePort(import.meta.env.VITE_WS_PORT, 8010);
+const WS_PORT = parsePort(import.meta.env.VITE_WS_PORT, 9001);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x87c9ff);
-scene.fog = new THREE.Fog(0x87c9ff, 80, 420);
+scene.background = new THREE.Color(0xf1b36d);
+scene.fog = new THREE.Fog(0xe6a45f, 70, 360);
 
 const camera = new THREE.PerspectiveCamera(
   75,
@@ -44,11 +72,11 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-const ambient = new THREE.HemisphereLight(0xe8f0ff, 0x344022, 0.62);
+const ambient = new THREE.HemisphereLight(0xffe0ad, 0x71411f, 0.9);
 scene.add(ambient);
 
-const sun = new THREE.DirectionalLight(0xfff2d9, 1.1);
-sun.position.set(140, 220, 100);
+const sun = new THREE.DirectionalLight(0xffd38a, 1.55);
+sun.position.set(120, 190, 60);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.left = -150;
@@ -57,8 +85,8 @@ sun.shadow.camera.top = 150;
 sun.shadow.camera.bottom = -150;
 scene.add(sun);
 
-const bounce = new THREE.DirectionalLight(0xbfd2ff, 0.28);
-bounce.position.set(-120, 80, -130);
+const bounce = new THREE.DirectionalLight(0xc96d35, 0.45);
+bounce.position.set(-100, 70, -90);
 scene.add(bounce);
 
 const terrainGeometry = new THREE.PlaneGeometry(
@@ -79,11 +107,11 @@ terrainGeometry.computeVertexNormals();
 const terrainDetailTexture = createTerrainDetailTexture(renderer);
 
 const terrainMaterial = new THREE.MeshStandardMaterial({
-  color: 0x6f8f58,
+  color: 0xc99552,
   map: terrainDetailTexture,
   bumpMap: terrainDetailTexture,
-  bumpScale: 0.45,
-  roughness: 0.88,
+  bumpScale: 0.62,
+  roughness: 0.96,
   metalness: 0.02,
 });
 
@@ -94,11 +122,18 @@ scene.add(terrain);
 const skyDome = new THREE.Mesh(
   new THREE.SphereGeometry(900, 32, 16),
   new THREE.MeshBasicMaterial({
-    color: 0x94d6ff,
+    color: 0xf3bb74,
     side: THREE.BackSide,
   }),
 );
 scene.add(skyDome);
+scene.add(createSunDisc());
+const armadilloCamp = createArmadilloCamp();
+scene.add(armadilloCamp);
+const armadillo = armadilloCamp.userData.armadillo;
+const craftingTable = armadilloCamp.userData.craftingTable;
+const moon = createMoonDisc();
+scene.add(moon);
 
 const keys = {
   forward: false,
@@ -117,11 +152,47 @@ const audio = {
   context: null,
 };
 
+const classes = {
+  nomad: { label: "Nomad", cost: 0, maxHealth: 100, sackCapacity: 6, barricadeCost: 2 },
+  scout: { label: "Scout", cost: 3, maxHealth: 90, sackCapacity: 8, barricadeCost: 2 },
+  tank: { label: "Tank", cost: 4, maxHealth: 145, sackCapacity: 5, barricadeCost: 2 },
+  engineer: { label: "Engineer", cost: 5, maxHealth: 110, sackCapacity: 7, barricadeCost: 1 },
+};
+
+const gameplay = {
+  phase: "day",
+  phaseElapsed: 0,
+  nightCount: 0,
+  health: PLAYER_MAX_HEALTH,
+  fireFuel: STARTING_FIRE_FUEL,
+  boards: 0,
+  guns: 0,
+  totalBoardsCollected: 0,
+  sackCapacity: SACK_CAPACITY,
+  barricadeKits: 0,
+  chestKits: 0,
+  coins: 6,
+  ownedClasses: new Set(["nomad"]),
+  selectedClassId: "nomad",
+  lobbyOpen: true,
+  enemySpawnTimer: 0,
+  armadilloAwake: false,
+  armadilloStunTimer: 0,
+  openChest: null,
+  status: "Reach the camp marker, fill your sack with boards, and keep the fire alive.",
+  prompt: "",
+  ended: false,
+  win: false,
+  resources: [],
+  enemies: [],
+  structures: [],
+};
+
 const net = {
   socket: null,
   connected: false,
   connecting: false,
-  nickname: "pilot",
+  nickname: "nomad",
   avatarColor: DEFAULT_AVATAR_COLOR,
   avatarPattern: DEFAULT_AVATAR_PATTERN,
   playerId: null,
@@ -157,6 +228,34 @@ const helpText = document.getElementById("help-text");
 const devOverlay = document.getElementById("dev-overlay");
 const devOverlayTitle = document.getElementById("dev-overlay-title");
 const devOverlayText = document.getElementById("dev-overlay-text");
+const gamePhase = document.getElementById("game-phase");
+const gameStatus = document.getElementById("game-status");
+const healthStat = document.getElementById("health-stat");
+const fireStat = document.getElementById("fire-stat");
+const woodStat = document.getElementById("wood-stat");
+const emberStat = document.getElementById("ember-stat");
+const gunStat = document.getElementById("gun-stat");
+const craftStat = document.getElementById("craft-stat");
+const chestStat = document.getElementById("chest-stat");
+const nightStat = document.getElementById("night-stat");
+const interactionPrompt = document.getElementById("interaction-prompt");
+const invBoards = document.getElementById("inv-boards");
+const invGuns = document.getElementById("inv-guns");
+const invBarricades = document.getElementById("inv-barricades");
+const invChests = document.getElementById("inv-chests");
+const invCoins = document.getElementById("inv-coins");
+const chestOverlay = document.getElementById("chest-overlay");
+const chestTitle = document.getElementById("chest-title");
+const chestSummary = document.getElementById("chest-summary");
+const chestStoreButton = document.getElementById("chest-store-btn");
+const chestTakeButton = document.getElementById("chest-take-btn");
+const chestCloseButton = document.getElementById("chest-close-btn");
+const lobbyScreen = document.getElementById("lobby-screen");
+const lobbyCoins = document.getElementById("lobby-coins");
+const lobbyClassText = document.getElementById("lobby-class-text");
+const lobbyTip = document.getElementById("lobby-tip");
+const lobbyJoinButton = document.getElementById("lobby-join-btn");
+const classCards = Array.from(document.querySelectorAll(".class-card"));
 const nickInput = document.getElementById("nick-input");
 const connectButton = document.getElementById("connect-btn");
 const colorInput = document.getElementById("color-input");
@@ -183,6 +282,26 @@ const onKey = (pressed) => (event) => {
       break;
     case "KeyL":
       if (pressed) togglePointerLock();
+      break;
+    case "KeyE":
+      if (pressed) {
+        handleInteraction();
+      }
+      break;
+    case "KeyC":
+      if (pressed) {
+        craftBarricade();
+      }
+      break;
+    case "KeyF":
+      if (pressed) {
+        placeBarricade();
+      }
+      break;
+    case "KeyX":
+      if (pressed) {
+        placeChest();
+      }
       break;
     default:
       break;
@@ -232,6 +351,31 @@ if (colorInput) {
 if (patternSelect) {
   patternSelect.addEventListener("change", onAvatarOptionsChanged);
 }
+for (const card of classCards) {
+  card.addEventListener("click", () => {
+    onClassCardClicked(card.dataset.classId || "nomad");
+  });
+}
+if (lobbyJoinButton) {
+  lobbyJoinButton.addEventListener("click", startConnectFromUi);
+}
+if (chestStoreButton) {
+  chestStoreButton.addEventListener("click", () => {
+    if (gameplay.openChest) {
+      storeBoardInOpenChest();
+    }
+  });
+}
+if (chestTakeButton) {
+  chestTakeButton.addEventListener("click", () => {
+    if (gameplay.openChest) {
+      takeBoardFromOpenChest();
+    }
+  });
+}
+if (chestCloseButton) {
+  chestCloseButton.addEventListener("click", closeChestOverlay);
+}
 
 document.addEventListener("pointerlockchange", () => {
   const locked = document.pointerLockElement === renderer.domElement;
@@ -239,14 +383,14 @@ document.addEventListener("pointerlockchange", () => {
     hasEverCapturedPointer = true;
     document.body.classList.add("playing");
     document.body.classList.remove("mouse-free");
-    setHelpStatus("Mouse captured. Press Esc or L to release.", "Playing");
+    setHelpStatus("Mouse captured. Press Esc or L to release.", "Crossing Dunes");
     return;
   }
 
   document.body.classList.remove("playing");
   if (hasEverCapturedPointer) {
     document.body.classList.add("mouse-free");
-    setHelpStatus("Mouse released. Click panel or press L to capture again.", "Mouse Free");
+    setHelpStatus("Mouse released. Click panel or press L to capture again.", "Camp Pause");
   }
 });
 
@@ -261,6 +405,10 @@ document.addEventListener("mousemove", (event) => {
 });
 
 renderer.domElement.addEventListener("mousedown", (event) => {
+  if (event.button === 0 && document.pointerLockElement === renderer.domElement) {
+    fireGun();
+    return;
+  }
   if (event.button === 0 && document.pointerLockElement !== renderer.domElement) {
     dragLookActive = true;
   }
@@ -280,8 +428,10 @@ window.addEventListener("blur", () => {
 });
 
 const clock = new THREE.Clock();
+initGameplay();
 initConnectUi();
 initDevNotifications();
+updateGameplayHud();
 
 function animate() {
   requestAnimationFrame(animate);
@@ -290,6 +440,7 @@ function animate() {
   sendInputTicks(dt);
   syncLocalPlayerFromServer();
   syncRenderedPlayersFromServer();
+  updateGameplay(dt);
   updateNetDebug();
 
   lookDirection.set(
@@ -306,13 +457,1009 @@ function animate() {
 
 animate();
 
+function initGameplay() {
+  spawnInitialResources();
+  spawnStarterStructures();
+  spawnStarterGuns();
+  applySelectedClass();
+  updateLobbyUi();
+}
+
+function onClassCardClicked(classId) {
+  const config = classes[classId];
+  if (!config) {
+    return;
+  }
+  if (!gameplay.ownedClasses.has(classId)) {
+    if (gameplay.coins < config.cost) {
+      if (lobbyTip) {
+        lobbyTip.textContent = `Not enough coins for ${config.label}.`;
+      }
+      return;
+    }
+    gameplay.coins -= config.cost;
+    gameplay.ownedClasses.add(classId);
+  }
+  gameplay.selectedClassId = classId;
+  applySelectedClass();
+  updateLobbyUi();
+}
+
+function applySelectedClass() {
+  const classConfig = classes[gameplay.selectedClassId] || classes.nomad;
+  gameplay.sackCapacity = classConfig.sackCapacity;
+  if (gameplay.lobbyOpen || !net.connected) {
+    gameplay.health = classConfig.maxHealth;
+  }
+}
+
+function updateLobbyUi() {
+  if (lobbyScreen) {
+    lobbyScreen.hidden = !gameplay.lobbyOpen;
+  }
+  if (lobbyCoins) {
+    lobbyCoins.textContent = `Coins ${gameplay.coins}`;
+  }
+  if (lobbyClassText) {
+    lobbyClassText.textContent = `Selected class: ${classes[gameplay.selectedClassId].label}`;
+  }
+  if (lobbyTip) {
+    const classConfig = classes[gameplay.selectedClassId];
+    lobbyTip.textContent = `${classConfig.label}: health ${classConfig.maxHealth}, sack ${classConfig.sackCapacity}.`;
+  }
+  for (const card of classCards) {
+    const classId = card.dataset.classId || "nomad";
+    const owned = gameplay.ownedClasses.has(classId);
+    card.classList.toggle("active", gameplay.selectedClassId === classId);
+    card.classList.toggle("locked", !owned);
+  }
+}
+
+function updateGameplay(dt) {
+  if (!net.connected || !net.playerId || gameplay.ended || gameplay.lobbyOpen) {
+    if (gameplay.openChest) {
+      closeChestOverlay();
+    }
+    if (interactionPrompt) {
+      interactionPrompt.hidden = true;
+    }
+    updateGameplayHud();
+    return;
+  }
+
+  gameplay.phaseElapsed += dt;
+  updateDayNightCycle(dt);
+  updateResourceNodes(dt);
+  updateStructures(dt);
+  updateArmadillo(dt);
+  updateEnemies(dt);
+  updateInteractionPrompt();
+  updateGameplayHud();
+  updateChestOverlay();
+}
+
+function updateDayNightCycle(dt) {
+  const phaseDuration = gameplay.phase === "day" ? DAY_DURATION_SECONDS : NIGHT_DURATION_SECONDS;
+  if (gameplay.phaseElapsed >= phaseDuration) {
+    gameplay.phaseElapsed -= phaseDuration;
+    if (gameplay.phase === "day") {
+      gameplay.phase = "night";
+      gameplay.nightCount += 1;
+      gameplay.enemySpawnTimer = 0;
+      gameplay.status = `Night ${gameplay.nightCount} begins. Keep the fire alive and defend the camp.`;
+      if (gameplay.nightCount > TOTAL_NIGHTS_TO_SURVIVE) {
+        winGame("You outlasted all 99 nights and the desert finally broke.");
+        return;
+      }
+    } else {
+      gameplay.phase = "day";
+      gameplay.status = "Dawn. Fill the sack with boards before the next night.";
+      if (gameplay.nightCount >= TOTAL_NIGHTS_TO_SURVIVE) {
+        winGame("Dawn on the 100th morning. The armadillo camp survives.");
+        return;
+      }
+    }
+  }
+
+  const cycleAlpha =
+    gameplay.phase === "day"
+      ? gameplay.phaseElapsed / DAY_DURATION_SECONDS
+      : gameplay.phaseElapsed / NIGHT_DURATION_SECONDS;
+  applyTimeOfDayLighting(gameplay.phase, cycleAlpha);
+
+  if (gameplay.phase === "night") {
+    gameplay.fireFuel = Math.max(0, gameplay.fireFuel - dt * FIRE_DRAIN_PER_SECOND);
+    gameplay.enemySpawnTimer += dt;
+    while (gameplay.enemySpawnTimer >= ENEMY_SPAWN_INTERVAL_SECONDS) {
+      gameplay.enemySpawnTimer -= ENEMY_SPAWN_INTERVAL_SECONDS;
+      spawnEnemy();
+    }
+  }
+
+  if (gameplay.fireFuel <= 0) {
+    if (!gameplay.armadilloAwake) {
+      gameplay.armadilloAwake = true;
+      gameplay.status = "The fire went out. The armadillo woke up and is hunting you.";
+    }
+  } else if (gameplay.armadilloAwake) {
+    gameplay.armadilloAwake = false;
+    gameplay.status = "The fire is back. The armadillo calms down near the camp.";
+  }
+}
+
+function updateResourceNodes(dt) {
+  for (const resource of gameplay.resources) {
+    if (resource.available) {
+      continue;
+    }
+    resource.respawnAt -= dt;
+    if (resource.respawnAt > 0) {
+      continue;
+    }
+    resource.available = true;
+    resource.mesh.visible = true;
+  }
+}
+
+function updateEnemies(dt) {
+  const fireRadiusBoost = gameplay.fireFuel > 0 ? FIRE_SAFE_RADIUS : 0;
+  for (let i = gameplay.enemies.length - 1; i >= 0; i -= 1) {
+    const enemy = gameplay.enemies[i];
+    const structureTarget = getPriorityStructureTarget(enemy.position);
+    const target =
+      structureTarget?.position || (gameplay.fireFuel > 0 ? DESERT_CAMP_POSITION : player.position);
+    const dx = target.x - enemy.position.x;
+    const dz = target.z - enemy.position.z;
+    const distance = Math.hypot(dx, dz) || 1;
+    let speed = gameplay.phase === "night" ? 5.1 : 2.4;
+    for (const structure of gameplay.structures) {
+      const distanceToStructure = horizontalDistance(enemy.position, structure.position);
+      if (distanceToStructure <= BARRICADE_SLOW_RADIUS) {
+        speed *= 0.42;
+        structure.health = Math.max(0, structure.health - 10 * dt);
+      }
+    }
+    enemy.position.x += (dx / distance) * speed * dt;
+    enemy.position.z += (dz / distance) * speed * dt;
+    const y = terrainBaseForSphereAt(enemy.position.x, enemy.position.z, 0.9) + 0.65;
+    enemy.position.y = y;
+    enemy.mesh.position.copy(enemy.position);
+    enemy.mesh.lookAt(target.x, y + 0.3, target.z);
+
+    const playerDistance = horizontalDistance(enemy.position, player.position);
+    if (playerDistance <= ENEMY_CONTACT_RANGE) {
+      gameplay.health = Math.max(0, gameplay.health - PLAYER_DAMAGE_PER_SECOND * dt);
+      gameplay.status = "Enemies are on you. Fall back to the fire.";
+      if (gameplay.health <= 0) {
+        loseGame("You were overrun before dawn.");
+        return;
+      }
+    }
+
+    if (structureTarget && horizontalDistance(enemy.position, structureTarget.position) <= 1.9) {
+      structureTarget.health = Math.max(0, structureTarget.health - 18 * dt);
+    }
+
+    const campDistance = horizontalDistance(enemy.position, DESERT_CAMP_POSITION);
+    if (campDistance <= fireRadiusBoost) {
+      enemy.health -= 32 * dt;
+      enemy.mesh.userData.sharedMaterial.emissiveIntensity = 0.7;
+    } else {
+      enemy.mesh.userData.sharedMaterial.emissiveIntensity = 0.22;
+    }
+
+    if (enemy.health <= 0) {
+      scene.remove(enemy.mesh);
+      disposeMesh(enemy.mesh);
+      gameplay.enemies.splice(i, 1);
+      gameplay.status = "The fire burned one of the raiders down.";
+    }
+  }
+}
+
+function updateStructures() {
+  for (let i = gameplay.structures.length - 1; i >= 0; i -= 1) {
+    const structure = gameplay.structures[i];
+    if (structure.health > 0) {
+      continue;
+    }
+    if (gameplay.openChest === structure) {
+      closeChestOverlay();
+    }
+    scene.remove(structure.mesh);
+    disposeMesh(structure.mesh);
+    gameplay.structures.splice(i, 1);
+    gameplay.status = `A ${structure.kind} broke under the pressure.`;
+  }
+}
+
+function updateArmadillo(dt) {
+  if (!armadillo) {
+    return;
+  }
+
+  const structureTarget = gameplay.phase === "night" ? getPriorityStructureTarget(armadillo.position) : null;
+  const target =
+    gameplay.armadilloAwake && structureTarget
+      ? structureTarget.position
+      : gameplay.armadilloAwake
+        ? player.position
+        : DESERT_CAMP_POSITION;
+  const dx = target.x - armadillo.position.x;
+  const dz = target.z - armadillo.position.z;
+  const distance = Math.hypot(dx, dz) || 1;
+  const speed = gameplay.armadilloAwake ? 8.4 : 2.8;
+
+  if (gameplay.armadilloAwake || distance > 0.35) {
+    const travel = Math.min(distance, speed * dt);
+    armadillo.position.x += (dx / distance) * travel;
+    armadillo.position.z += (dz / distance) * travel;
+    armadillo.lookAt(target.x, armadillo.position.y, target.z);
+  }
+
+  const campY = terrainHeight(armadillo.position.x, armadillo.position.z);
+  armadillo.position.y = campY + 0.2;
+
+  if (!gameplay.armadilloAwake) {
+    gameplay.armadilloStunTimer = 0;
+    return;
+  }
+
+  if (gameplay.armadilloStunTimer > 0) {
+    gameplay.armadilloStunTimer = Math.max(0, gameplay.armadilloStunTimer - dt);
+    return;
+  }
+
+  const playerDistance = horizontalDistance(armadillo.position, player.position);
+  if (playerDistance > ARMADILLO_WAKE_RANGE) {
+    return;
+  }
+  if (!structureTarget && playerDistance <= ENEMY_CONTACT_RANGE + 0.9) {
+    gameplay.health = Math.max(0, gameplay.health - ARMADILLO_DAMAGE_PER_SECOND * dt);
+    gameplay.status = "The armadillo is mauling you. Relight the fire or run.";
+    if (gameplay.health <= 0) {
+      loseGame("The armadillo brought the run to an end.");
+    }
+  }
+
+  for (const structure of gameplay.structures) {
+    const distanceToStructure = horizontalDistance(armadillo.position, structure.position);
+    if (distanceToStructure <= BARRICADE_SLOW_RADIUS) {
+      structure.health = Math.max(0, structure.health - (structure.kind === "chest" ? 24 : 18) * dt);
+    }
+  }
+}
+
+function updateInteractionPrompt() {
+  const interaction = getInteractionTarget();
+  if (!interactionPrompt) {
+    return;
+  }
+  if (!interaction) {
+    interactionPrompt.hidden = true;
+    return;
+  }
+  interactionPrompt.hidden = false;
+  interactionPrompt.textContent = interaction.prompt;
+}
+
+function updateGameplayHud() {
+  if (gamePhase) {
+    gamePhase.textContent =
+      gameplay.phase === "day" ? `Daybreak ${gameplay.nightCount + 1}` : `Night ${gameplay.nightCount}`;
+  }
+  if (gameStatus) {
+    gameStatus.textContent = gameplay.status;
+  }
+  if (healthStat) {
+    healthStat.textContent = `Health ${Math.round(gameplay.health)}`;
+  }
+  if (fireStat) {
+    fireStat.textContent = `Fire ${Math.round(gameplay.fireFuel)}`;
+  }
+  if (woodStat) {
+    woodStat.textContent = `Boards ${gameplay.boards}`;
+  }
+  if (emberStat) {
+    emberStat.textContent = `Sack ${gameplay.boards} / ${gameplay.sackCapacity}`;
+  }
+  if (gunStat) {
+    gunStat.textContent = `Guns ${gameplay.guns}`;
+  }
+  if (craftStat) {
+    craftStat.textContent = `Barricades ${gameplay.barricadeKits}`;
+  }
+  if (chestStat) {
+    chestStat.textContent = `Chests ${gameplay.chestKits}`;
+  }
+  if (nightStat) {
+    nightStat.textContent = `Night ${Math.min(gameplay.nightCount, TOTAL_NIGHTS_TO_SURVIVE)} / ${TOTAL_NIGHTS_TO_SURVIVE}`;
+  }
+  if (invBoards) {
+    invBoards.textContent = `Boards ${gameplay.boards}`;
+  }
+  if (invGuns) {
+    invGuns.textContent = `Guns ${gameplay.guns}`;
+  }
+  if (invBarricades) {
+    invBarricades.textContent = `Barricades ${gameplay.barricadeKits}`;
+  }
+  if (invChests) {
+    invChests.textContent = `Chest Kits ${gameplay.chestKits}`;
+  }
+  if (invCoins) {
+    invCoins.textContent = `Coins ${gameplay.coins}`;
+  }
+}
+
+function handleInteraction() {
+  if (!net.connected || !net.playerId || gameplay.ended) {
+    return;
+  }
+
+  const interaction = getInteractionTarget();
+  if (!interaction) {
+    gameplay.status = "Nothing close enough to use.";
+    return;
+  }
+
+  if (interaction.type === "resource") {
+    collectResource(interaction.resource);
+    return;
+  }
+
+  if (interaction.type === "gun") {
+    collectGun(interaction.resource);
+    return;
+  }
+
+  if (interaction.type === "camp") {
+    feedCampfire();
+    return;
+  }
+
+  if (interaction.type === "table") {
+    craftAtTable();
+    return;
+  }
+
+  if (interaction.type === "chest") {
+    openChestOverlay(interaction.structure);
+  }
+}
+
+function craftBarricade() {
+  if (!net.connected || !net.playerId || gameplay.ended || gameplay.lobbyOpen) {
+    return;
+  }
+  if (horizontalDistance(player.position, getCraftingTablePosition()) > STRUCTURE_INTERACT_RANGE) {
+    gameplay.status = "Go to the crafting table to craft a barricade.";
+    return;
+  }
+  const barricadeCost = classes[gameplay.selectedClassId]?.barricadeCost ?? BARRICADE_CRAFT_COST;
+  if (gameplay.boards < barricadeCost) {
+    gameplay.status = `You need ${barricadeCost} boards to craft a barricade.`;
+    return;
+  }
+  gameplay.boards -= barricadeCost;
+  gameplay.barricadeKits += 1;
+  gameplay.status = "Crafted a barricade kit. Press F to place it.";
+}
+
+function placeBarricade() {
+  if (!net.connected || !net.playerId || gameplay.ended || gameplay.lobbyOpen) {
+    return;
+  }
+  if (gameplay.barricadeKits <= 0) {
+    gameplay.status = "Craft a barricade first with C.";
+    return;
+  }
+
+  const forwardX = Math.sin(player.courseYaw);
+  const forwardZ = -Math.cos(player.courseYaw);
+  const x = player.position.x + forwardX * 4;
+  const z = player.position.z + forwardZ * 4;
+  const y = terrainBaseForSphereAt(x, z, 0.9) + 1.1;
+  const mesh = createBarricadeMesh();
+  mesh.position.set(x, y, z);
+  mesh.rotation.y = -player.courseYaw;
+  scene.add(mesh);
+  gameplay.structures.push({
+    kind: "barricade",
+    mesh,
+    position: mesh.position.clone(),
+    health: BARRICADE_MAX_HEALTH,
+  });
+  gameplay.barricadeKits -= 1;
+  gameplay.status = "Barricade placed.";
+}
+
+function placeChest() {
+  if (!net.connected || !net.playerId || gameplay.ended || gameplay.lobbyOpen) {
+    return;
+  }
+  if (gameplay.chestKits <= 0) {
+    gameplay.status = "Craft a chest first at the crafting table.";
+    return;
+  }
+
+  const forwardX = Math.sin(player.courseYaw);
+  const forwardZ = -Math.cos(player.courseYaw);
+  const x = player.position.x + forwardX * 4.5;
+  const z = player.position.z + forwardZ * 4.5;
+  const y = terrainBaseForSphereAt(x, z, 0.9) + 0.8;
+  const mesh = createChestMesh();
+  mesh.position.set(x, y, z);
+  mesh.rotation.y = -player.courseYaw;
+  scene.add(mesh);
+  gameplay.structures.push({
+    kind: "chest",
+    mesh,
+    position: mesh.position.clone(),
+    health: CHEST_MAX_HEALTH,
+    storedBoards: 0,
+  });
+  gameplay.chestKits -= 1;
+  gameplay.status = "Chest placed. The armadillo may attack it at night.";
+}
+
+function spawnStarterStructures() {
+  const starterBarricadeA = createBarricadeMesh();
+  starterBarricadeA.position.set(
+    DESERT_CAMP_POSITION.x + 5,
+    terrainBaseForSphereAt(DESERT_CAMP_POSITION.x + 5, DESERT_CAMP_POSITION.z - 5, 0.9) + 1.1,
+    DESERT_CAMP_POSITION.z - 5,
+  );
+  starterBarricadeA.rotation.y = Math.PI / 6;
+  scene.add(starterBarricadeA);
+  gameplay.structures.push({
+    kind: "barricade",
+    mesh: starterBarricadeA,
+    position: starterBarricadeA.position.clone(),
+    health: BARRICADE_MAX_HEALTH,
+  });
+
+  const starterBarricadeB = createBarricadeMesh();
+  starterBarricadeB.position.set(
+    DESERT_CAMP_POSITION.x - 6,
+    terrainBaseForSphereAt(DESERT_CAMP_POSITION.x - 6, DESERT_CAMP_POSITION.z - 4, 0.9) + 1.1,
+    DESERT_CAMP_POSITION.z - 4,
+  );
+  starterBarricadeB.rotation.y = -Math.PI / 5;
+  scene.add(starterBarricadeB);
+  gameplay.structures.push({
+    kind: "barricade",
+    mesh: starterBarricadeB,
+    position: starterBarricadeB.position.clone(),
+    health: BARRICADE_MAX_HEALTH,
+  });
+
+  const starterChest = createChestMesh();
+  starterChest.position.set(DESERT_CAMP_POSITION.x + 9, terrainBaseForSphereAt(DESERT_CAMP_POSITION.x + 9, DESERT_CAMP_POSITION.z + 3, 0.9) + 0.8, DESERT_CAMP_POSITION.z + 3);
+  starterChest.rotation.y = Math.PI / 5;
+  scene.add(starterChest);
+  gameplay.structures.push({
+    kind: "chest",
+    mesh: starterChest,
+    position: starterChest.position.clone(),
+    health: CHEST_MAX_HEALTH,
+    storedBoards: 2,
+  });
+
+  const worldChestSpawns = [
+    [DESERT_CAMP_POSITION.x + 24, DESERT_CAMP_POSITION.z - 18, 3],
+    [DESERT_CAMP_POSITION.x - 26, DESERT_CAMP_POSITION.z + 22, 1],
+    [DESERT_CAMP_POSITION.x + 42, DESERT_CAMP_POSITION.z + 8, 4],
+  ];
+  for (const [x, z, storedBoards] of worldChestSpawns) {
+    const chest = createChestMesh();
+    chest.position.set(x, terrainBaseForSphereAt(x, z, 0.9) + 0.8, z);
+    chest.rotation.y = Math.random() * Math.PI * 2;
+    scene.add(chest);
+    gameplay.structures.push({
+      kind: "chest",
+      mesh: chest,
+      position: chest.position.clone(),
+      health: CHEST_MAX_HEALTH,
+      storedBoards,
+    });
+  }
+}
+
+function spawnStarterGuns() {
+  const gunSpawns = [
+    [DESERT_CAMP_POSITION.x + 14, DESERT_CAMP_POSITION.z - 8],
+    [DESERT_CAMP_POSITION.x - 18, DESERT_CAMP_POSITION.z + 10],
+    [DESERT_CAMP_POSITION.x + 4, DESERT_CAMP_POSITION.z + 20],
+  ];
+
+  for (const [x, z] of gunSpawns) {
+    spawnGunPickup(x, z);
+  }
+}
+
+function getInteractionTarget() {
+  const campDistance = horizontalDistance(player.position, DESERT_CAMP_POSITION);
+  if (campDistance <= CAMP_INTERACT_RANGE && gameplay.boards > 0) {
+    return {
+      type: "camp",
+      prompt: "Press E to throw a board into the fire. C craft, F place barricade",
+    };
+  }
+
+  const tableWorldPosition = getCraftingTablePosition();
+  const tableDistance = horizontalDistance(player.position, tableWorldPosition);
+  if (tableDistance <= STRUCTURE_INTERACT_RANGE) {
+    return {
+      type: "table",
+      prompt: "Press E at crafting table. C barricade, X place chest after crafting",
+    };
+  }
+
+  for (const structure of gameplay.structures) {
+    if (structure.kind !== "chest") {
+      continue;
+    }
+    if (horizontalDistance(player.position, structure.position) <= STRUCTURE_INTERACT_RANGE) {
+      return {
+        type: "chest",
+        structure,
+        prompt: "Press E to stash or withdraw boards from chest",
+      };
+    }
+  }
+
+  for (const resource of gameplay.resources) {
+    if (!resource.available || resource.kind !== "gun") {
+      continue;
+    }
+    if (horizontalDistance(player.position, resource.position) <= RESOURCE_INTERACT_RANGE) {
+      return {
+        type: "gun",
+        resource,
+        prompt: "Press E to pick up a gun",
+      };
+    }
+  }
+
+  let nearest = null;
+  let nearestDistance = RESOURCE_INTERACT_RANGE;
+  for (const resource of gameplay.resources) {
+    if (!resource.available || resource.kind === "gun") {
+      continue;
+    }
+    const distance = horizontalDistance(player.position, resource.position);
+    if (distance < nearestDistance) {
+      nearest = resource;
+      nearestDistance = distance;
+    }
+  }
+
+  if (!nearest) {
+    return null;
+  }
+
+  return {
+    type: "resource",
+    resource: nearest,
+    prompt: "Press E to pick up a wooden board. C craft, F place barricade",
+  };
+}
+
+function craftAtTable() {
+  if (gameplay.boards >= CHEST_CRAFT_COST) {
+    gameplay.boards -= CHEST_CRAFT_COST;
+    gameplay.chestKits += 1;
+    gameplay.status = "Crafted a chest kit. Press X to place it.";
+    return;
+  }
+  gameplay.status = "Need 3 boards at the crafting table to craft a chest.";
+}
+
+function toggleChestStorage(structure) {
+  if (!structure) {
+    return;
+  }
+  if (gameplay.boards > 0 && structure.storedBoards < 10) {
+    structure.storedBoards += 1;
+    gameplay.boards -= 1;
+    gameplay.status = `Stored a board. Chest now holds ${structure.storedBoards}.`;
+    return;
+  }
+  if (structure.storedBoards > 0 && gameplay.boards < gameplay.sackCapacity) {
+    structure.storedBoards -= 1;
+    gameplay.boards += 1;
+    gameplay.status = `Took a board from chest. Chest now holds ${structure.storedBoards}.`;
+    return;
+  }
+  gameplay.status = "Chest transfer failed. Sack may be full or chest empty.";
+}
+
+function openChestOverlay(structure) {
+  gameplay.openChest = structure;
+  unlockPointer();
+  updateChestOverlay();
+}
+
+function closeChestOverlay() {
+  gameplay.openChest = null;
+  updateChestOverlay();
+}
+
+function updateChestOverlay() {
+  if (!chestOverlay) {
+    return;
+  }
+  const structure = gameplay.openChest;
+  chestOverlay.hidden = !structure;
+  if (!structure) {
+    return;
+  }
+  if (chestTitle) {
+    chestTitle.textContent = "World Chest";
+  }
+  if (chestSummary) {
+    chestSummary.textContent = `Stored boards ${structure.storedBoards} | Your boards ${gameplay.boards}`;
+  }
+}
+
+function storeBoardInOpenChest() {
+  if (!gameplay.openChest) {
+    return;
+  }
+  toggleChestStorage(gameplay.openChest);
+  updateChestOverlay();
+}
+
+function takeBoardFromOpenChest() {
+  if (!gameplay.openChest) {
+    return;
+  }
+  if (gameplay.openChest.storedBoards > 0 && gameplay.boards < gameplay.sackCapacity) {
+    gameplay.openChest.storedBoards -= 1;
+    gameplay.boards += 1;
+    gameplay.status = `Took a board from chest. Chest now holds ${gameplay.openChest.storedBoards}.`;
+  } else {
+    gameplay.status = "Cannot take board. Chest empty or sack full.";
+  }
+  updateChestOverlay();
+}
+
+function getPriorityStructureTarget(origin) {
+  let nearest = null;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  for (const structure of gameplay.structures) {
+    if (structure.health <= 0) {
+      continue;
+    }
+    const distance = horizontalDistance(origin, structure.position);
+    if (distance < nearestDistance) {
+      nearest = structure;
+      nearestDistance = distance;
+    }
+  }
+  return nearest;
+}
+
+function collectResource(resource) {
+  if (gameplay.boards >= gameplay.sackCapacity) {
+    gameplay.status = "Your sack is full. Throw some boards into the fire first.";
+    return;
+  }
+  resource.available = false;
+  resource.respawnAt = RESOURCE_RESPAWN_SECONDS;
+  resource.mesh.visible = false;
+  gameplay.boards += 1;
+  gameplay.totalBoardsCollected += 1;
+  if (gameplay.totalBoardsCollected % 5 === 0) {
+    spawnGunPickup(resource.position.x + 1.6, resource.position.z + 0.8);
+    gameplay.status = "Collected a board. Every fifth board drops a gun nearby.";
+    return;
+  }
+  gameplay.status = "Collected a wooden board. Bring it back before the fire dies.";
+}
+
+function collectGun(resource) {
+  resource.available = false;
+  resource.respawnAt = Number.POSITIVE_INFINITY;
+  resource.mesh.visible = false;
+  gameplay.guns += 1;
+  gameplay.status = `Picked up a gun. Guns found: ${gameplay.guns}.`;
+}
+
+function fireGun() {
+  if (!net.connected || !net.playerId || gameplay.ended || gameplay.lobbyOpen) {
+    return;
+  }
+  if (gameplay.guns <= 0) {
+    gameplay.status = "No guns in inventory.";
+    return;
+  }
+
+  gameplay.guns -= 1;
+  const aim = new THREE.Vector3(
+    Math.sin(player.courseYaw) * Math.cos(player.pitch),
+    Math.sin(player.pitch),
+    -Math.cos(player.courseYaw) * Math.cos(player.pitch),
+  ).normalize();
+
+  let bestEnemy = null;
+  let bestEnemyDistance = GUN_RANGE;
+  for (const enemy of gameplay.enemies) {
+    const toEnemy = new THREE.Vector3(
+      enemy.position.x - player.position.x,
+      enemy.position.y - player.position.y,
+      enemy.position.z - player.position.z,
+    );
+    const distance = toEnemy.length();
+    if (distance > GUN_RANGE || distance <= 0.001) {
+      continue;
+    }
+    toEnemy.normalize();
+    if (aim.dot(toEnemy) < GUN_CONE_DOT) {
+      continue;
+    }
+    if (distance < bestEnemyDistance) {
+      bestEnemy = enemy;
+      bestEnemyDistance = distance;
+    }
+  }
+
+  if (bestEnemy) {
+    bestEnemy.health -= 120;
+    gameplay.status = "Gunshot landed on an enemy.";
+    return;
+  }
+
+  const toArmadillo = new THREE.Vector3(
+    armadillo.position.x - player.position.x,
+    armadillo.position.y - player.position.y,
+    armadillo.position.z - player.position.z,
+  );
+  const armadilloDistance = toArmadillo.length();
+  if (armadilloDistance > 0.001 && armadilloDistance <= GUN_RANGE) {
+    toArmadillo.normalize();
+    if (aim.dot(toArmadillo) >= GUN_CONE_DOT) {
+      gameplay.armadilloStunTimer = 2.2;
+      gameplay.status = "Gunshot stunned the armadillo for a moment.";
+      return;
+    }
+  }
+
+  gameplay.status = "Gunshot missed.";
+}
+
+function feedCampfire() {
+  if (gameplay.boards <= 0) {
+    gameplay.status = "You need boards in the sack before feeding the fire.";
+    return;
+  }
+
+  gameplay.boards -= 1;
+  gameplay.fireFuel = Math.min(FIRE_MAX_FUEL, gameplay.fireFuel + FIRE_FEED_AMOUNT);
+  gameplay.status =
+    gameplay.fireFuel > 0
+      ? "The board catches and the fire climbs again."
+      : "The board smolders, but the fire is still weak.";
+}
+
+function spawnInitialResources() {
+  const resourcePlan = [
+    ["board", -28, -16],
+    ["board", 18, 42],
+    ["board", -60, 28],
+    ["board", 74, -12],
+    ["board", -8, 74],
+    ["board", -46, -58],
+    ["board", 58, 16],
+    ["board", 84, 54],
+    ["board", -84, 10],
+  ];
+
+  for (const [kind, x, z] of resourcePlan) {
+    const resource = createResourceNode(kind, x, z);
+    gameplay.resources.push(resource);
+    scene.add(resource.mesh);
+  }
+}
+
+function createResourceNode(kind, x, z) {
+  const isGun = kind === "gun";
+  const material = new THREE.MeshStandardMaterial(
+    isGun
+      ? {
+          color: 0x9ea6b7,
+          emissive: 0xffb14a,
+          emissiveIntensity: 0.55,
+          roughness: 0.32,
+          metalness: 0.72,
+        }
+      : { color: 0x9f6e3f, roughness: 0.92, metalness: 0.03 },
+  );
+  const mesh = new THREE.Mesh(
+    isGun ? new THREE.BoxGeometry(1.4, 0.28, 0.42) : new THREE.BoxGeometry(1.9, 0.3, 0.58),
+    material,
+  );
+  mesh.rotation.y = Math.random() * Math.PI;
+  mesh.rotation.z = isGun ? Math.PI / 10 : 0;
+  const y = terrainBaseForSphereAt(x, z, 0.9) + (isGun ? 0.42 : 0.45);
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  return {
+    kind,
+    mesh,
+    position: mesh.position.clone(),
+    available: true,
+    respawnAt: 0,
+  };
+}
+
+function spawnGunPickup(x, z) {
+  const gun = createResourceNode("gun", x, z);
+  gameplay.resources.push(gun);
+  scene.add(gun.mesh);
+}
+
+function spawnEnemy() {
+  const angle = Math.random() * Math.PI * 2;
+  const radius = WORLD_SIZE * 0.42;
+  const x = DESERT_CAMP_POSITION.x + Math.cos(angle) * radius;
+  const z = DESERT_CAMP_POSITION.z + Math.sin(angle) * radius;
+  const y = terrainBaseForSphereAt(x, z, 0.9) + 0.65;
+  const mesh = createEnemyMesh();
+  mesh.position.set(x, y, z);
+  scene.add(mesh);
+  gameplay.enemies.push({
+    mesh,
+    position: mesh.position.clone(),
+    health: 100,
+  });
+}
+
+function createEnemyMesh() {
+  const group = new THREE.Group();
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x2b1f1a,
+    emissive: 0xc34e24,
+    emissiveIntensity: 0.22,
+    roughness: 0.72,
+    metalness: 0.04,
+  });
+  const body = new THREE.Mesh(new THREE.SphereGeometry(0.9, 16, 14), material);
+  body.scale.set(1.1, 0.75, 1.45);
+  body.castShadow = true;
+  group.add(body);
+  const eye = new THREE.Mesh(
+    new THREE.SphereGeometry(0.1, 10, 10),
+    new THREE.MeshStandardMaterial({ color: 0xffc28c, emissive: 0xff8c40, emissiveIntensity: 1.1 }),
+  );
+  eye.position.set(-0.24, 0.12, -1.02);
+  group.add(eye);
+  const eyeRight = eye.clone();
+  eyeRight.position.x = 0.24;
+  group.add(eyeRight);
+  group.userData.sharedMaterial = material;
+  return group;
+}
+
+function createBarricadeMesh() {
+  const group = new THREE.Group();
+  const woodMaterial = new THREE.MeshStandardMaterial({
+    color: 0x7d4d2a,
+    roughness: 0.94,
+    metalness: 0.02,
+  });
+
+  const boardA = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.24, 0.18), woodMaterial);
+  boardA.position.set(0, 0.9, 0);
+  boardA.rotation.z = Math.PI / 7;
+  boardA.castShadow = true;
+  group.add(boardA);
+
+  const boardB = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.24, 0.18), woodMaterial);
+  boardB.position.set(0, 0.9, 0);
+  boardB.rotation.z = -Math.PI / 7;
+  boardB.castShadow = true;
+  group.add(boardB);
+
+  const supportLeft = new THREE.Mesh(new THREE.BoxGeometry(0.2, 2.2, 0.2), woodMaterial);
+  supportLeft.position.set(-0.8, 1.1, 0);
+  supportLeft.castShadow = true;
+  group.add(supportLeft);
+
+  const supportRight = supportLeft.clone();
+  supportRight.position.x = 0.8;
+  group.add(supportRight);
+
+  return group;
+}
+
+function createChestMesh() {
+  const group = new THREE.Group();
+  const woodMaterial = new THREE.MeshStandardMaterial({
+    color: 0x7a4a28,
+    roughness: 0.92,
+    metalness: 0.02,
+  });
+  const bandMaterial = new THREE.MeshStandardMaterial({
+    color: 0x9d8b74,
+    roughness: 0.55,
+    metalness: 0.22,
+  });
+
+  const base = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.9, 1), woodMaterial);
+  base.castShadow = true;
+  group.add(base);
+
+  const lid = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.28, 1.08), woodMaterial);
+  lid.position.y = 0.58;
+  lid.castShadow = true;
+  group.add(lid);
+
+  const bandA = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 1.08), bandMaterial);
+  bandA.position.x = -0.48;
+  group.add(bandA);
+  const bandB = bandA.clone();
+  bandB.position.x = 0.48;
+  group.add(bandB);
+
+  const lock = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.24, 0.12), bandMaterial);
+  lock.position.set(0, 0.18, 0.56);
+  group.add(lock);
+
+  return group;
+}
+
+function applyTimeOfDayLighting(phase, alpha) {
+  const phaseBlend = phase === "day" ? 1 - alpha * 0.5 : alpha;
+  const fogColor = new THREE.Color().lerpColors(
+    new THREE.Color(0xe6a45f),
+    new THREE.Color(0x0d1830),
+    THREE.MathUtils.clamp(phaseBlend, 0, 1),
+  );
+  scene.background.copy(fogColor);
+  scene.fog.color.copy(fogColor);
+  ambient.intensity = THREE.MathUtils.lerp(0.95, 0.18, phaseBlend);
+  sun.intensity = THREE.MathUtils.lerp(1.55, 0.12, phaseBlend);
+  bounce.intensity = THREE.MathUtils.lerp(0.45, 0.1, phaseBlend);
+  skyDome.material.color.copy(new THREE.Color().lerpColors(
+    new THREE.Color(0xf3bb74),
+    new THREE.Color(0x10213d),
+    phaseBlend,
+  ));
+  moon.visible = phaseBlend > 0.35;
+  moon.material.opacity = THREE.MathUtils.clamp((phaseBlend - 0.25) / 0.75, 0, 0.85);
+}
+
+function loseGame(message) {
+  if (gameplay.ended) {
+    return;
+  }
+  gameplay.ended = true;
+  gameplay.win = false;
+  gameplay.status = message;
+  showDevOverlay("Camp Lost", `${message} Reload to try the run again.`);
+  unlockPointer();
+}
+
+function winGame(message) {
+  if (gameplay.ended) {
+    return;
+  }
+  gameplay.ended = true;
+  gameplay.win = true;
+  gameplay.status = message;
+  showDevOverlay("99 Nights Cleared", `${message} Reload to start another run.`);
+  unlockPointer();
+}
+
 function connectToServer() {
   clearReconnectTimer();
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const host = window.location.hostname || "127.0.0.1";
   const url = `${protocol}://${host}:${WS_PORT}`;
 
-  setHelpStatus(`Connecting as ${net.nickname} to ${url}...`, "Connecting");
+  setHelpStatus(`Calling the caravan as ${net.nickname} at ${url}...`, "Entering Desert");
   net.connecting = true;
   updateConnectUi();
   const socket = new WebSocket(url);
@@ -335,7 +1482,7 @@ function connectToServer() {
       }),
     );
     hideDevOverlay();
-    setHelpStatus("Connected. Click panel or press L to capture mouse.", "Connected");
+    setHelpStatus("Connected. Click panel or press L to capture mouse.", "Camp Linked");
   });
 
   socket.addEventListener("message", (event) => {
@@ -362,19 +1509,19 @@ function connectToServer() {
     document.body.classList.remove("playing");
     updateConnectUi();
     if (reconnectExpected && net.reconnectEnabled) {
-      showDevOverlay("Server Restarting", "Server update in progress. Reconnecting soon.");
+      showDevOverlay("Camp Shifting", "The desert instance is reloading. Reconnecting soon.");
       scheduleReconnect(Math.max(250, net.restartExpectedUntilMs - performance.now()));
-      setHelpStatus("Server restart in progress. Reconnecting soon.", "Reconnecting");
+      setHelpStatus("Camp is shifting. Reconnecting soon.", "Reconnecting");
       return;
     }
-    setHelpStatus("Disconnected from server.", "Disconnected");
+    setHelpStatus("Lost contact with camp.", "Disconnected");
   });
 
   socket.addEventListener("error", () => {
     net.connecting = false;
     updateConnectUi();
     if (!isReconnectExpected()) {
-      setHelpStatus(`Connection error. Ensure server is running on port ${WS_PORT}.`, "Connection Error");
+      setHelpStatus(`Connection error. Ensure desert server is running on port ${WS_PORT}.`, "Connection Error");
     }
   });
 }
@@ -441,7 +1588,7 @@ function onServerMessage(message) {
   if (message.type === "serverRestarting") {
     const delayMs = Number(message.delayMs);
     net.restartExpectedUntilMs = performance.now() + (Number.isFinite(delayMs) ? Math.max(250, delayMs) : 1400);
-    showDevOverlay("Server Restarting", message.message || "Server update in progress. Reconnecting soon.");
+    showDevOverlay("Camp Shifting", message.message || "Desert server update in progress. Reconnecting soon.");
     return;
   }
 }
@@ -1071,7 +2218,7 @@ function sampleInterpolatedPosition(playerId) {
   return lastSample;
 }
 
-function setHelpStatus(text, title = "Click to Play") {
+function setHelpStatus(text, title = "99 Nights In The Desert") {
   const nextText = text;
   const nextTitle = title;
 
@@ -1107,13 +2254,15 @@ function initConnectUi() {
   }
   renderAvatarPreview(net.avatarColor, net.avatarPattern);
   updateConnectUi();
-  setHelpStatus("Enter nickname and connect. Then click panel or press L to capture mouse.", "Ready");
+  setHelpStatus("Choose a nomad name and enter the desert. Then click panel or press L to capture mouse.", "Sundown Briefing");
 }
 
 function startConnectFromUi() {
   if (net.connected || net.connecting) {
     return;
   }
+  gameplay.lobbyOpen = false;
+  updateLobbyUi();
   net.reconnectEnabled = true;
   ensureAudioContext();
   net.nickname = sanitizeNickname(nickInput?.value);
@@ -1146,7 +2295,7 @@ function initDevNotifications() {
     clientUpdateOverlayTimer = setTimeout(() => {
       const delayMs = Number(data?.delayMs);
       const seconds = Math.max(1, Math.round((Number.isFinite(delayMs) ? delayMs : 1400) / 100) / 10);
-      showDevOverlay("Client Updating", `Client changes detected. Reloading this tab in about ${seconds}s.`);
+      showDevOverlay("Mirage Shifting", `Client changes detected. Reloading this tab in about ${seconds}s.`);
     }, CLIENT_UPDATE_OVERLAY_DEBOUNCE_MS);
   });
 }
@@ -1270,7 +2419,7 @@ function updateConnectUi() {
   }
   if (connectButton) {
     connectButton.disabled = disabled;
-    connectButton.textContent = net.connecting ? "Connecting..." : "Connect";
+    connectButton.textContent = net.connecting ? "Crossing..." : "Enter Desert";
   }
 }
 
@@ -1308,11 +2457,12 @@ function terrainHeight(x, z) {
   const t = THREE.MathUtils.clamp((distanceFromCenter - centerRadius) / transition, 0, 1);
   const roughness = smoothstep(t);
 
-  const mountains = fbm(x * 0.01, z * 0.01, 4, 2.0, 0.5) * (6.0 + roughness * 11.0);
-  const hills = fbm(x * 0.03, z * 0.03, 3, 2.1, 0.55) * (2.8 + roughness * 3.4);
-  const ripples = fbm(x * 0.085, z * 0.085, 2, 2.0, 0.5) * 0.9;
+  const dunes = fbm(x * 0.008, z * 0.01, 4, 2.0, 0.52) * (3.6 + roughness * 6.8);
+  const ridges = fbm(x * 0.021, z * 0.031, 3, 2.15, 0.52) * (1.2 + roughness * 2.7);
+  const ripples = fbm(x * 0.09, z * 0.055, 2, 2.0, 0.5) * 0.6;
+  const basin = -Math.max(0, 1 - distanceFromCenter / (WORLD_SIZE * 0.5)) * 1.8;
 
-  return mountains + hills + ripples;
+  return dunes + ridges + ripples + basin;
 }
 
 function terrainBaseForSphereAt(x, z, radius) {
@@ -1382,10 +2532,10 @@ function rand2(x, z) {
 
 function sanitizeNickname(rawName) {
   if (typeof rawName !== "string") {
-    return "pilot";
+    return "nomad";
   }
   const cleaned = rawName.replace(/\s+/g, " ").trim().slice(0, 20);
-  return cleaned.length > 0 ? cleaned : "pilot";
+  return cleaned.length > 0 ? cleaned : "nomad";
 }
 
 function normalizeAvatarColor(rawColor) {
@@ -1436,15 +2586,14 @@ function createTerrainDetailTexture(rendererInstance) {
     return null;
   }
 
-  ctx.fillStyle = "#8aac70";
+  ctx.fillStyle = "#d0a261";
   ctx.fillRect(0, 0, size, size);
 
-  // Macro checker gives better motion perception than fine noise alone.
   const macro = 32;
   for (let y = 0; y < size; y += macro) {
     for (let x = 0; x < size; x += macro) {
       const even = ((x / macro) + (y / macro)) % 2 === 0;
-      ctx.fillStyle = even ? "rgba(120, 152, 96, 0.22)" : "rgba(86, 120, 68, 0.22)";
+      ctx.fillStyle = even ? "rgba(223, 184, 119, 0.2)" : "rgba(171, 123, 70, 0.16)";
       ctx.fillRect(x, y, macro, macro);
     }
   }
@@ -1452,12 +2601,12 @@ function createTerrainDetailTexture(rendererInstance) {
   for (let i = 0; i < 3600; i += 1) {
     const x = Math.random() * size;
     const y = Math.random() * size;
-    const shade = 112 + Math.floor(Math.random() * 72);
-    ctx.fillStyle = `rgb(${shade - 22}, ${shade}, ${shade - 28})`;
+    const shade = 160 + Math.floor(Math.random() * 70);
+    ctx.fillStyle = `rgb(${shade}, ${shade - 38}, ${shade - 84})`;
     ctx.fillRect(x, y, 1, 1);
   }
 
-  ctx.strokeStyle = "rgba(55, 82, 44, 0.45)";
+  ctx.strokeStyle = "rgba(147, 96, 42, 0.36)";
   ctx.lineWidth = 1;
   for (let i = -size; i < size * 2; i += 20) {
     ctx.beginPath();
@@ -1466,7 +2615,7 @@ function createTerrainDetailTexture(rendererInstance) {
     ctx.stroke();
   }
 
-  ctx.strokeStyle = "rgba(132, 170, 108, 0.22)";
+  ctx.strokeStyle = "rgba(247, 216, 161, 0.15)";
   for (let i = 0; i <= size; i += 32) {
     ctx.beginPath();
     ctx.moveTo(0, i);
@@ -1481,4 +2630,249 @@ function createTerrainDetailTexture(rendererInstance) {
   texture.repeat.set(56, 56);
   texture.anisotropy = rendererInstance.capabilities.getMaxAnisotropy();
   return texture;
+}
+
+function createSunDisc() {
+  const sunDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(24, 24, 18),
+    new THREE.MeshBasicMaterial({
+      color: 0xffd27a,
+      transparent: true,
+      opacity: 0.95,
+    }),
+  );
+  sunDisc.position.set(-180, 120, -260);
+  return sunDisc;
+}
+
+function createMoonDisc() {
+  const moonDisc = new THREE.Mesh(
+    new THREE.SphereGeometry(16, 20, 16),
+    new THREE.MeshBasicMaterial({
+      color: 0xc9d7ff,
+      transparent: true,
+      opacity: 0,
+    }),
+  );
+  moonDisc.position.set(200, 140, -180);
+  moonDisc.visible = false;
+  return moonDisc;
+}
+
+function createArmadilloCamp() {
+  const group = new THREE.Group();
+  const campGroundY = terrainHeight(DESERT_CAMP_POSITION.x, DESERT_CAMP_POSITION.z);
+  const tableWorldX = DESERT_CAMP_POSITION.x + CRAFTING_TABLE_OFFSET.x;
+  const tableWorldZ = DESERT_CAMP_POSITION.z + CRAFTING_TABLE_OFFSET.z;
+  const tableGroundY = terrainHeight(tableWorldX, tableWorldZ);
+  const armadilloRoot = new THREE.Group();
+  armadilloRoot.position.set(DESERT_CAMP_POSITION.x, campGroundY + 0.2, DESERT_CAMP_POSITION.z);
+  group.add(armadilloRoot);
+  group.userData.armadillo = armadilloRoot;
+
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: 0x8e6446,
+    roughness: 0.92,
+    metalness: 0.02,
+  });
+  const shellMaterial = new THREE.MeshStandardMaterial({
+    color: 0x704629,
+    roughness: 0.88,
+    metalness: 0.03,
+  });
+  const paleMaterial = new THREE.MeshStandardMaterial({
+    color: 0xd6b08a,
+    roughness: 0.95,
+    metalness: 0.01,
+  });
+  const darkMaterial = new THREE.MeshStandardMaterial({
+    color: 0x22150f,
+    roughness: 0.7,
+    metalness: 0.02,
+  });
+
+  const shell = new THREE.Mesh(new THREE.SphereGeometry(2.2, 26, 18), shellMaterial);
+  shell.scale.set(1.3, 0.82, 1);
+  shell.castShadow = true;
+  armadilloRoot.add(shell);
+
+  for (let i = -2; i <= 2; i += 1) {
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.9, 1.98), paleMaterial);
+    stripe.position.set(i * 0.55, 0.08, 0);
+    stripe.rotation.z = 0.08 * i;
+    stripe.castShadow = true;
+    armadilloRoot.add(stripe);
+  }
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.7, 18, 14), bodyMaterial);
+  head.position.set(0, -0.15, -2.35);
+  head.scale.set(0.95, 0.8, 1.15);
+  head.castShadow = true;
+  armadilloRoot.add(head);
+
+  const snout = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.3, 0.9, 10), paleMaterial);
+  snout.rotation.x = Math.PI / 2;
+  snout.position.set(0, -0.12, -3);
+  snout.castShadow = true;
+  armadilloRoot.add(snout);
+
+  const ear = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.38, 10), bodyMaterial);
+  ear.position.set(-0.32, 0.48, -2.35);
+  ear.rotation.z = 0.38;
+  ear.castShadow = true;
+  armadilloRoot.add(ear);
+  const earRight = ear.clone();
+  earRight.position.x = 0.32;
+  earRight.rotation.z = -0.38;
+  armadilloRoot.add(earRight);
+
+  const eye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 10, 10), darkMaterial);
+  eye.position.set(-0.22, 0.08, -2.92);
+  armadilloRoot.add(eye);
+  const eyeRight = eye.clone();
+  eyeRight.position.x = 0.22;
+  armadilloRoot.add(eyeRight);
+
+  const legOffsets = [
+    [-1.4, -1.15, -1.05],
+    [1.4, -1.15, -1.05],
+    [-1.2, -1.15, 1.15],
+    [1.2, -1.15, 1.15],
+  ];
+  for (const [x, y, z] of legOffsets) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.18, 0.92, 10), bodyMaterial);
+    leg.position.set(x, y, z);
+    leg.castShadow = true;
+    armadilloRoot.add(leg);
+  }
+
+  const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.2, 2.4, 12), shellMaterial);
+  tail.position.set(0, -0.3, 2.55);
+  tail.rotation.x = Math.PI / 2;
+  tail.rotation.z = 0.08;
+  tail.castShadow = true;
+  armadilloRoot.add(tail);
+
+  const marker = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.12, 0.16, 4.8, 10),
+    new THREE.MeshStandardMaterial({
+      color: 0x6c3d20,
+      roughness: 0.94,
+      metalness: 0.01,
+    }),
+  );
+  marker.position.set(DESERT_CAMP_POSITION.x - 4.1, campGroundY + 2.1, DESERT_CAMP_POSITION.z - 1.8);
+  marker.castShadow = true;
+  group.add(marker);
+
+  const lantern = new THREE.Mesh(
+    new THREE.SphereGeometry(0.34, 14, 12),
+    new THREE.MeshStandardMaterial({
+      color: 0xffc768,
+      emissive: 0xff9f2f,
+      emissiveIntensity: 1.3,
+      roughness: 0.36,
+      metalness: 0.04,
+    }),
+  );
+  lantern.position.set(DESERT_CAMP_POSITION.x - 4.1, campGroundY + 4.6, DESERT_CAMP_POSITION.z - 1.8);
+  group.add(lantern);
+
+  const flag = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.8, 1.1),
+    new THREE.MeshStandardMaterial({
+      color: 0xc65a2a,
+      side: THREE.DoubleSide,
+      roughness: 0.92,
+      metalness: 0.02,
+    }),
+  );
+  flag.position.set(DESERT_CAMP_POSITION.x - 3.15, campGroundY + 4.05, DESERT_CAMP_POSITION.z - 1.8);
+  flag.rotation.y = Math.PI / 8;
+  group.add(flag);
+
+  const table = createCraftingTableMesh();
+  table.position.set(tableWorldX, tableGroundY + 1.05, tableWorldZ);
+  group.add(table);
+  group.userData.craftingTable = table;
+
+  return group;
+}
+
+function createCraftingTableMesh() {
+  const group = new THREE.Group();
+  const woodMaterial = new THREE.MeshStandardMaterial({
+    color: 0x88532d,
+    roughness: 0.94,
+    metalness: 0.02,
+  });
+  const metalMaterial = new THREE.MeshStandardMaterial({
+    color: 0x9a8d77,
+    roughness: 0.52,
+    metalness: 0.18,
+  });
+
+  const top = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.24, 1.6), woodMaterial);
+  top.castShadow = true;
+  group.add(top);
+
+  const leg = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.5, 0.18), woodMaterial);
+  leg.position.set(-1, -0.82, -0.55);
+  leg.castShadow = true;
+  group.add(leg);
+  const leg2 = leg.clone();
+  leg2.position.set(1, -0.82, -0.55);
+  group.add(leg2);
+  const leg3 = leg.clone();
+  leg3.position.set(-1, -0.82, 0.55);
+  group.add(leg3);
+  const leg4 = leg.clone();
+  leg4.position.set(1, -0.82, 0.55);
+  group.add(leg4);
+
+  const tool = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.08, 0.18), metalMaterial);
+  tool.position.set(0.4, 0.18, 0.24);
+  tool.rotation.z = Math.PI / 7;
+  group.add(tool);
+
+  return group;
+}
+
+function getCraftingTablePosition() {
+  if (craftingTable) {
+    return craftingTable.position;
+  }
+  return new THREE.Vector3(
+    DESERT_CAMP_POSITION.x + CRAFTING_TABLE_OFFSET.x,
+    0,
+    DESERT_CAMP_POSITION.z + CRAFTING_TABLE_OFFSET.z,
+  );
+}
+
+function horizontalDistance(a, b) {
+  return Math.hypot((a.x || 0) - (b.x || 0), (a.z || 0) - (b.z || 0));
+}
+
+function disposeMesh(root) {
+  root.traverse((node) => {
+    if (node.geometry) {
+      node.geometry.dispose();
+    }
+    if (!node.material) {
+      return;
+    }
+    if (Array.isArray(node.material)) {
+      for (const material of node.material) {
+        if (material.map) {
+          material.map.dispose();
+        }
+        material.dispose();
+      }
+      return;
+    }
+    if (node.material.map) {
+      node.material.map.dispose();
+    }
+    node.material.dispose();
+  });
 }
